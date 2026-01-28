@@ -52,6 +52,64 @@ cd TokenOptimizer
 cargo build --release
 ```
 
+## Configuration
+
+TokenOptimizer uses a TOML configuration file with environment variable overrides.
+
+### Quick Setup
+
+```bash
+# Initialize config file
+token-optimizer config init
+
+# Set API keys interactively
+token-optimizer config set-key venice
+token-optimizer config set-key claude
+
+# Or use environment variables
+export VENICE_API_KEY=your_venice_key
+export ANTHROPIC_API_KEY=your_anthropic_key
+
+# Validate configuration
+token-optimizer config validate
+```
+
+### Config File Location
+
+- **Linux/macOS**: `~/.config/token-optimizer/config.toml`
+- **Windows**: `%APPDATA%\token-optimizer\config.toml`
+
+### Configuration Options
+
+```bash
+# Show current configuration
+token-optimizer config show
+
+# Show specific section
+token-optimizer config show --section venice
+
+# Set individual values
+token-optimizer config set venice.model deepseek-coder-v2
+token-optimizer config set orchestrator.primary_provider venice
+token-optimizer config set optimization.target_tokens 8000
+```
+
+### Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `VENICE_API_KEY` | Venice.ai API key |
+| `ANTHROPIC_API_KEY` | Anthropic/Claude API key |
+| `OPENAI_API_KEY` | OpenAI API key (optional) |
+| `OLLAMA_URL` | Ollama server URL |
+| `OLLAMA_MODEL` | Ollama model for preprocessing |
+
+Environment variables override config file values.
+
+### Example Configuration
+
+See [`config.example.toml`](config.example.toml) for a complete example with all options documented.
+
 ## Usage
 
 ### CLI Commands

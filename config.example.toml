@@ -1,0 +1,157 @@
+# TokenOptimizer Configuration
+# Copy this file to ~/.config/token-optimizer/config.toml
+# Or run: token-optimizer config init
+
+# =============================================================================
+# Venice.ai Configuration (Primary Provider)
+# =============================================================================
+[venice]
+# API key - get from https://venice.ai/settings/api
+# Can also be set via VENICE_API_KEY environment variable
+# api_key = "your-venice-api-key"
+
+# Base URL for Venice API
+base_url = "https://api.venice.ai/api/v1"
+
+# Model to use for code tasks
+# Options: llama-3.3-70b, deepseek-coder-v2, qwen-2.5-coder-32b, venice-small, grok-code-fast-1
+model = "llama-3.3-70b"
+
+# Minimum USD balance before triggering fallback to Claude
+min_balance_usd = 0.10
+
+# Minimum Diem balance before triggering fallback
+min_balance_diem = 0.10
+
+# Maximum tokens for responses
+max_tokens = 4096
+
+# Temperature for generation (0.0 - 1.0)
+temperature = 0.7
+
+# Whether Venice is enabled
+enabled = true
+
+# =============================================================================
+# Claude/Anthropic Configuration (Fallback Provider)
+# =============================================================================
+[claude]
+# API key - get from https://console.anthropic.com/
+# Can also be set via ANTHROPIC_API_KEY environment variable
+# api_key = "your-anthropic-api-key"
+
+# Base URL for Anthropic API
+base_url = "https://api.anthropic.com/v1"
+
+# Model to use
+# Options: claude-sonnet-4-20250514, claude-opus-4-20250514
+model = "claude-sonnet-4-20250514"
+
+# Maximum tokens for responses
+max_tokens = 4096
+
+# Temperature for generation
+temperature = 0.7
+
+# Use Claude Code CLI as fallback (instead of API)
+# Requires 'claude' CLI to be installed and authenticated
+use_cli_fallback = true
+
+# Path to Claude Code CLI (if not in PATH)
+# cli_path = "/usr/local/bin/claude"
+
+# Whether Claude is enabled as fallback
+enabled = true
+
+# =============================================================================
+# OpenAI Configuration (Optional)
+# =============================================================================
+# Uncomment to enable OpenAI as an alternative provider
+# [openai]
+# api_key = "your-openai-api-key"
+# base_url = "https://api.openai.com/v1"
+# model = "gpt-4"
+# max_tokens = 4096
+# temperature = 0.7
+
+# =============================================================================
+# Local LLM Configuration (Ollama)
+# =============================================================================
+[local]
+# Ollama server URL
+url = "http://localhost:11434"
+
+# Model for preprocessing (relevance scoring, compression)
+# Recommended: llama3.2, qwen2.5-coder, deepseek-coder
+model = "llama3.2"
+
+# Whether local LLM is enabled
+enabled = true
+
+# Maximum tokens for compressed context
+max_compressed_tokens = 2000
+
+# Relevance threshold for filtering (0.0 - 1.0)
+relevance_threshold = 0.3
+
+# Enable aggressive compression
+aggressive_compression = false
+
+# =============================================================================
+# Orchestrator Settings
+# =============================================================================
+[orchestrator]
+# Primary provider (venice, claude, openai)
+primary_provider = "venice"
+
+# Fallback provider when primary exhausted (claude, openai, none)
+fallback_provider = "claude"
+
+# Maximum retries before fallback
+max_retries = 2
+
+# Preserve conversation context during handoff
+preserve_context = true
+
+# Allow switching back to primary after fallback
+allow_primary_after_fallback = false
+
+# Session timeout in seconds
+session_timeout_secs = 3600
+
+# Maximum conversation history to preserve
+max_history = 20
+
+# =============================================================================
+# Optimization Settings
+# =============================================================================
+[optimization]
+# Target token budget for prompts
+target_tokens = 4000
+
+# Strategies to apply (in order)
+# Options: strip_whitespace, remove_comments, truncate_context, abbreviate,
+#          llm_compress, relevance_filter, extract_signatures, deduplicate
+strategies = ["strip_whitespace", "remove_comments", "relevance_filter"]
+
+# Preserve code block formatting during optimization
+preserve_code_blocks = true
+
+# Use local LLM for optimization (requires local.enabled = true)
+use_local_llm = true
+
+# =============================================================================
+# Cache Settings
+# =============================================================================
+[cache]
+# Minimum tokens for caching (Anthropic requires ~1024)
+min_cache_tokens = 1024
+
+# Maximum cache breakpoints
+max_breakpoints = 4
+
+# Auto-reorder content for optimal caching
+auto_reorder = true
+
+# Enable cache hit/miss tracking
+track_cache = true

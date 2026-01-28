@@ -14,6 +14,7 @@
 pub mod agents;
 pub mod api;
 pub mod cache;
+pub mod config;
 pub mod metrics;
 pub mod optimization;
 pub mod orchestrator;
@@ -21,6 +22,7 @@ pub mod orchestrator;
 pub use agents::{LocalAgent, LocalAgentConfig, PreprocessingAgent};
 pub use api::{ApiAgent, ApiRequest, ApiResponse, VeniceConfig, VeniceProvider};
 pub use cache::{CacheConfig, CacheOptimizer, CacheTracker, CacheMetrics};
+pub use config::{Config, ConfigBuilder, ConfigError};
 pub use metrics::TokenMetrics;
 pub use orchestrator::{
     ClaudeApiFallback, ClaudeCodeFallback, FallbackProvider, Orchestrator, OrchestratorConfig,

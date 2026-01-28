@@ -7,6 +7,7 @@ use token_optimizer::{
     agents::{LocalAgent, LocalAgentConfig, PreprocessingAgent},
     api::{ApiConfig, ApiRequest, ContextItem, ContextType, ProviderType},
     cache::{CacheConfig, CacheOptimizer},
+    config::Config,
     metrics::MetricsTracker,
     optimization::{OptimizationConfig, PromptOptimizer, StrategyType},
 };
@@ -116,6 +117,48 @@ enum Commands {
         #[arg(long)]
         static_indices: Option<String>,
     },
+
+    /// Manage configuration
+    #[command(subcommand)]
+    Config(ConfigCommands),
+}
+
+#[derive(Subcommand)]
+enum ConfigCommands {
+    /// Initialize configuration file with defaults
+    Init {
+        /// Overwrite existing config
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Show current configuration
+    Show {
+        /// Show only specific section (venice, claude, local, etc.)
+        #[arg(short, long)]
+        section: Option<String>,
+    },
+
+    /// Set a configuration value
+    Set {
+        /// Configuration key (e.g., venice.api_key, claude.model)
+        key: String,
+
+        /// Value to set
+        value: String,
+    },
+
+    /// Show configuration file path
+    Path,
+
+    /// Validate configuration
+    Validate,
+
+    /// Set API key interactively (masks input)
+    SetKey {
+        /// Provider (venice, claude, openai)
+        provider: String,
+    },
 }
 
 #[tokio::main]
@@ -176,6 +219,9 @@ async fn main() -> Result<()> {
             static_indices,
         } => {
             run_cache_optimize(task, context, system, static_indices).await?;
+        }
+        Commands::Config(cmd) => {
+            run_config_command(cmd).await?;
         }
     }
 
@@ -651,6 +697,322 @@ async fn run_cache_optimize(
     if optimized.request.system_cache_control.is_none() && optimized.request.system.is_some() {
         println!("  - Consider caching the system prompt if it's reused across requests");
     }
+
+    Ok(())
+}
+
+async fn run_config_command(cmd: ConfigCommands) -> Result<()> {
+    match cmd {
+        ConfigCommands::Init { force } => {
+            config_init(force).await?;
+        }
+        ConfigCommands::Show { section } => {
+            config_show(section)?;
+        }
+        ConfigCommands::Set { key, value } => {
+            config_set(&key, &value)?;
+        }
+        ConfigCommands::Path => {
+            config_path();
+        }
+        ConfigCommands::Validate => {
+            config_validate()?;
+        }
+        ConfigCommands::SetKey { provider } => {
+            config_set_key(&provider).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn config_init(force: bool) -> Result<()> {
+    let path = Config::default_path();
+
+    if path.exists() && !force {
+        println!("Configuration file already exists at: {}", path.display());
+        println!("Use --force to overwrite");
+        return Ok(());
+    }
+
+    let config = Config::default();
+    config.save()?;
+
+    println!("Configuration file created at: {}", path.display());
+    println!();
+    println!("Next steps:");
+    println!("  1. Edit the config file to add your API keys, or");
+    println!("  2. Set environment variables:");
+    println!("     export VENICE_API_KEY=your_venice_key");
+    println!("     export ANTHROPIC_API_KEY=your_anthropic_key");
+    println!();
+    println!("Or use the interactive key setup:");
+    println!("  token-optimizer config set-key venice");
+    println!("  token-optimizer config set-key claude");
+
+    Ok(())
+}
+
+fn config_show(section: Option<String>) -> Result<()> {
+    let config = Config::load()?;
+
+    let display = if let Some(sec) = section {
+        match sec.to_lowercase().as_str() {
+            "venice" => toml::to_string_pretty(&config.venice)?,
+            "claude" => toml::to_string_pretty(&config.claude)?,
+            "openai" => {
+                if let Some(openai) = &config.openai {
+                    toml::to_string_pretty(openai)?
+                } else {
+                    "OpenAI not configured".to_string()
+                }
+            }
+            "local" => toml::to_string_pretty(&config.local)?,
+            "orchestrator" => toml::to_string_pretty(&config.orchestrator)?,
+            "optimization" => toml::to_string_pretty(&config.optimization)?,
+            "cache" => toml::to_string_pretty(&config.cache)?,
+            _ => {
+                println!("Unknown section: {}", sec);
+                println!("Available: venice, claude, openai, local, orchestrator, optimization, cache");
+                return Ok(());
+            }
+        }
+    } else {
+        // Mask API keys in display
+        let mut display_config = config.clone();
+        if display_config.venice.api_key.is_some() {
+            display_config.venice.api_key = Some("***".to_string());
+        }
+        if display_config.claude.api_key.is_some() {
+            display_config.claude.api_key = Some("***".to_string());
+        }
+        if let Some(ref mut openai) = display_config.openai {
+            if openai.api_key.is_some() {
+                openai.api_key = Some("***".to_string());
+            }
+        }
+        toml::to_string_pretty(&display_config)?
+    };
+
+    println!("{}", display);
+
+    // Show environment variable status
+    println!("\n--- Environment Variables ---");
+    println!("VENICE_API_KEY: {}", if std::env::var("VENICE_API_KEY").is_ok() { "set" } else { "not set" });
+    println!("ANTHROPIC_API_KEY: {}", if std::env::var("ANTHROPIC_API_KEY").is_ok() { "set" } else { "not set" });
+    println!("OPENAI_API_KEY: {}", if std::env::var("OPENAI_API_KEY").is_ok() { "set" } else { "not set" });
+    println!("OLLAMA_URL: {}", std::env::var("OLLAMA_URL").unwrap_or_else(|_| "not set".to_string()));
+
+    Ok(())
+}
+
+fn config_set(key: &str, value: &str) -> Result<()> {
+    let mut config = Config::load()?;
+
+    let parts: Vec<&str> = key.split('.').collect();
+    if parts.len() != 2 {
+        println!("Invalid key format. Use: section.key (e.g., venice.model)");
+        return Ok(());
+    }
+
+    let (section, field) = (parts[0], parts[1]);
+
+    match section {
+        "venice" => match field {
+            "api_key" => config.venice.api_key = Some(value.to_string()),
+            "model" => config.venice.model = value.to_string(),
+            "base_url" => config.venice.base_url = value.to_string(),
+            "min_balance_usd" => config.venice.min_balance_usd = value.parse()?,
+            "min_balance_diem" => config.venice.min_balance_diem = value.parse()?,
+            "max_tokens" => config.venice.max_tokens = value.parse()?,
+            "temperature" => config.venice.temperature = value.parse()?,
+            "enabled" => config.venice.enabled = value.parse()?,
+            _ => {
+                println!("Unknown venice field: {}", field);
+                return Ok(());
+            }
+        },
+        "claude" => match field {
+            "api_key" => config.claude.api_key = Some(value.to_string()),
+            "model" => config.claude.model = value.to_string(),
+            "base_url" => config.claude.base_url = value.to_string(),
+            "max_tokens" => config.claude.max_tokens = value.parse()?,
+            "temperature" => config.claude.temperature = value.parse()?,
+            "use_cli_fallback" => config.claude.use_cli_fallback = value.parse()?,
+            "cli_path" => config.claude.cli_path = Some(value.to_string()),
+            "enabled" => config.claude.enabled = value.parse()?,
+            _ => {
+                println!("Unknown claude field: {}", field);
+                return Ok(());
+            }
+        },
+        "local" => match field {
+            "url" => config.local.url = value.to_string(),
+            "model" => config.local.model = value.to_string(),
+            "enabled" => config.local.enabled = value.parse()?,
+            "relevance_threshold" => config.local.relevance_threshold = value.parse()?,
+            _ => {
+                println!("Unknown local field: {}", field);
+                return Ok(());
+            }
+        },
+        "orchestrator" => match field {
+            "primary_provider" => config.orchestrator.primary_provider = value.to_string(),
+            "fallback_provider" => config.orchestrator.fallback_provider = value.to_string(),
+            "max_retries" => config.orchestrator.max_retries = value.parse()?,
+            "preserve_context" => config.orchestrator.preserve_context = value.parse()?,
+            _ => {
+                println!("Unknown orchestrator field: {}", field);
+                return Ok(());
+            }
+        },
+        "optimization" => match field {
+            "target_tokens" => config.optimization.target_tokens = value.parse()?,
+            "preserve_code_blocks" => config.optimization.preserve_code_blocks = value.parse()?,
+            "use_local_llm" => config.optimization.use_local_llm = value.parse()?,
+            _ => {
+                println!("Unknown optimization field: {}", field);
+                return Ok(());
+            }
+        },
+        "cache" => match field {
+            "min_cache_tokens" => config.cache.min_cache_tokens = value.parse()?,
+            "max_breakpoints" => config.cache.max_breakpoints = value.parse()?,
+            "auto_reorder" => config.cache.auto_reorder = value.parse()?,
+            _ => {
+                println!("Unknown cache field: {}", field);
+                return Ok(());
+            }
+        },
+        _ => {
+            println!("Unknown section: {}", section);
+            println!("Available: venice, claude, local, orchestrator, optimization, cache");
+            return Ok(());
+        }
+    }
+
+    config.save()?;
+    println!("Set {} = {}", key, if field == "api_key" { "***" } else { value });
+
+    Ok(())
+}
+
+fn config_path() {
+    let path = Config::default_path();
+    println!("{}", path.display());
+
+    if path.exists() {
+        println!("(file exists)");
+    } else {
+        println!("(file does not exist - run 'config init' to create)");
+    }
+}
+
+fn config_validate() -> Result<()> {
+    let config = Config::load()?;
+
+    match config.validate() {
+        Ok(()) => {
+            println!("Configuration is valid!");
+            println!();
+
+            // Show what's configured
+            println!("Configured providers:");
+
+            let venice_key = config.venice_api_key();
+            if config.venice.enabled && venice_key.is_some() {
+                println!("  Venice.ai: enabled (model: {})", config.venice.model);
+            } else if config.venice.enabled {
+                println!("  Venice.ai: enabled but NO API KEY");
+            } else {
+                println!("  Venice.ai: disabled");
+            }
+
+            let claude_key = config.claude_api_key();
+            if config.claude.enabled && (claude_key.is_some() || config.claude.use_cli_fallback) {
+                let method = if config.claude.use_cli_fallback { "CLI" } else { "API" };
+                println!("  Claude: enabled via {} (model: {})", method, config.claude.model);
+            } else if config.claude.enabled {
+                println!("  Claude: enabled but NO API KEY and CLI fallback disabled");
+            } else {
+                println!("  Claude: disabled");
+            }
+
+            if config.local.enabled {
+                println!("  Local LLM: enabled (url: {}, model: {})", config.local.url, config.local.model);
+            } else {
+                println!("  Local LLM: disabled");
+            }
+
+            println!();
+            println!("Orchestration: {} -> {}",
+                config.orchestrator.primary_provider,
+                config.orchestrator.fallback_provider);
+        }
+        Err(e) => {
+            println!("Configuration validation failed:");
+            println!("  {}", e);
+            println!();
+            println!("To fix, either:");
+            println!("  1. Set API keys in config: token-optimizer config set-key venice");
+            println!("  2. Set environment variables: export VENICE_API_KEY=your_key");
+        }
+    }
+
+    Ok(())
+}
+
+async fn config_set_key(provider: &str) -> Result<()> {
+    use std::io::{self, Write};
+
+    let key_name = match provider.to_lowercase().as_str() {
+        "venice" => "VENICE_API_KEY",
+        "claude" | "anthropic" => "ANTHROPIC_API_KEY",
+        "openai" => "OPENAI_API_KEY",
+        _ => {
+            println!("Unknown provider: {}", provider);
+            println!("Available: venice, claude, openai");
+            return Ok(());
+        }
+    };
+
+    println!("Enter your {} API key (input will be hidden):", provider);
+    print!("> ");
+    io::stdout().flush()?;
+
+    // Read key (note: this won't actually hide input in most terminals without rpassword crate)
+    let mut key = String::new();
+    io::stdin().read_line(&mut key)?;
+    let key = key.trim();
+
+    if key.is_empty() {
+        println!("No key entered, aborting.");
+        return Ok(());
+    }
+
+    // Save to config
+    let mut config = Config::load()?;
+
+    match provider.to_lowercase().as_str() {
+        "venice" => config.venice.api_key = Some(key.to_string()),
+        "claude" | "anthropic" => config.claude.api_key = Some(key.to_string()),
+        "openai" => {
+            if config.openai.is_none() {
+                config.openai = Some(token_optimizer::config::OpenAISettings::default());
+            }
+            if let Some(ref mut openai) = config.openai {
+                openai.api_key = Some(key.to_string());
+            }
+        }
+        _ => {}
+    }
+
+    config.save()?;
+
+    println!();
+    println!("API key saved to config file.");
+    println!();
+    println!("Alternatively, you can set the environment variable:");
+    println!("  export {}=your_key", key_name);
 
     Ok(())
 }
