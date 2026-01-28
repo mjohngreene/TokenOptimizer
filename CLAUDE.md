@@ -17,16 +17,20 @@ src/
 │   ├── mod.rs          # ApiProvider trait, error types
 │   ├── client.rs       # Multi-provider client (Claude, OpenAI, Ollama)
 │   ├── request.rs      # ApiRequest, ContextItem structures
-│   └── response.rs     # ApiResponse, TokenUsage with cache support
+│   ├── response.rs     # ApiResponse, TokenUsage with cache support
+│   └── venice.rs       # Venice.ai provider with credit tracking
 ├── cache/              # Cache prompting optimization
 │   ├── mod.rs          # CacheConfig, CacheControl types
 │   ├── strategy.rs     # CacheOptimizer, content classification
 │   └── tracker.rs      # CacheTracker, metrics
 ├── metrics/            # Token tracking
 │   └── mod.rs          # TokenMetrics, MetricsTracker
-└── optimization/       # Prompt optimization
-    ├── mod.rs          # OptimizationConfig, StrategyType enum
-    └── strategies.rs   # PromptOptimizer, strategy implementations
+├── optimization/       # Prompt optimization
+│   ├── mod.rs          # OptimizationConfig, StrategyType enum
+│   └── strategies.rs   # PromptOptimizer, strategy implementations
+└── orchestrator/       # Agent coordination with fallback
+    ├── mod.rs          # Orchestrator, FallbackProvider trait
+    └── session.rs      # Session management for handoffs
 ```
 
 ## Key Concepts
@@ -52,6 +56,19 @@ src/
 - Static content must come first in prompts
 - Cache breakpoints mark reusable boundaries
 - Cached tokens are ~90% cheaper on subsequent requests
+
+### Agent Orchestration (Venice → Claude Code)
+The orchestrator manages a workflow where:
+1. **Local LLM** (Ollama) preprocesses and optimizes prompts
+2. **Venice.ai** receives optimized prompts as primary provider
+3. **Claude Code** is fallback when Venice credits exhausted
+
+Fallback triggers:
+- 429 error with "insufficient" / "quota" / "balance" message
+- Balance headers below threshold (`x-venice-balance-usd`, `x-venice-balance-diem`)
+- Manual force via `orchestrator.force_fallback()`
+
+Session handoff preserves conversation context for continuity.
 
 ## Development Commands
 
@@ -88,7 +105,18 @@ cargo run -- cache-optimize --task "Add feature" --context types.rs --static-ind
 
 ## API Provider Notes
 
-### Anthropic Claude
+### Venice.ai (Primary Provider)
+- Base URL: `https://api.venice.ai/api/v1`
+- Uses `Authorization: Bearer` header
+- OpenAI-compatible chat completions format
+- Balance tracking via response headers:
+  - `x-venice-balance-usd` - USD credit balance
+  - `x-venice-balance-diem` - Diem token balance
+- Rate limit headers: `x-ratelimit-remaining-requests`, `x-ratelimit-remaining-tokens`
+- Balance endpoint: `/api_keys/rate_limits` (beta)
+- Recommended models for code: `llama-3.3-70b`, `deepseek-coder-v2`, `qwen-2.5-coder-32b`
+
+### Anthropic Claude (Fallback Provider)
 - Uses `x-api-key` header
 - Supports `cache_control` blocks in system and messages
 - Returns `cache_creation_input_tokens` and `cache_read_input_tokens`
@@ -99,7 +127,7 @@ cargo run -- cache-optimize --task "Add feature" --context types.rs --static-ind
 - No cache prompting support
 - Standard chat completions format
 
-### Ollama
+### Ollama (Local Preprocessing)
 - Local server at `http://localhost:11434`
 - OpenAI-compatible format
 - Used for preprocessing (relevance scoring, compression)

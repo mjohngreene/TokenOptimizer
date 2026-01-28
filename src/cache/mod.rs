@@ -14,7 +14,7 @@ mod strategy;
 mod tracker;
 
 pub use strategy::{BreakpointPosition, CacheOptimizer, CacheOptimizedRequest, CacheableContent, ContentStability};
-pub use tracker::{CacheMetrics, CacheTracker};
+pub use tracker::{CacheMetrics, CacheSummary, CacheTracker};
 
 use serde::{Deserialize, Serialize};
 

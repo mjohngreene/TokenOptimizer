@@ -4,6 +4,13 @@ A Rust library and CLI tool for coordinating code agents with a primary focus on
 
 ## Features
 
+### Agent Orchestration (Venice.ai → Claude Code)
+- **Venice.ai as primary** - Use Venice credits for cost-effective API calls
+- **Automatic fallback** - Switch to Claude Code when Venice credits exhausted
+- **Session handoff** - Preserve conversation context during provider transitions
+- **Credit tracking** - Monitor balance via response headers
+- **Configurable thresholds** - Set minimum balance for preemptive fallback
+
 ### Prompt Optimization
 - **Whitespace stripping** - Remove unnecessary whitespace while preserving code structure
 - **Comment removal** - Strip comments from code context
@@ -177,9 +184,54 @@ CacheConfig {
 }
 ```
 
+### Agent Orchestration
+
+```rust
+use token_optimizer::{
+    VeniceConfig, VeniceProvider,
+    ClaudeCodeFallback, Orchestrator, OrchestratorConfig,
+    metrics::MetricsTracker,
+};
+
+// Configure Venice.ai as primary provider
+let venice_config = VeniceConfig {
+    api_key: std::env::var("VENICE_API_KEY").unwrap(),
+    model: "llama-3.3-70b".to_string(),
+    min_balance_usd: 0.10,  // Trigger fallback below $0.10
+    ..Default::default()
+};
+let venice = VeniceProvider::new(venice_config);
+
+// Configure Claude Code as fallback
+let fallback = ClaudeCodeFallback::new();
+
+// Create orchestrator
+let orchestrator = Orchestrator::new(
+    OrchestratorConfig::default(),
+    venice,
+    fallback,
+    MetricsTracker::new(),
+);
+
+// Execute request - automatically falls back if Venice exhausted
+let response = orchestrator.execute(request).await?;
+
+// Check current state
+match orchestrator.state().await {
+    OrchestratorState::UsingVenice => println!("Using Venice"),
+    OrchestratorState::UsingFallback => println!("Switched to Claude Code"),
+    _ => {}
+}
+
+// Check Venice balance
+let balance = orchestrator.venice_balance().await;
+println!("Venice balance: ${:.2}", balance.balance_usd);
+```
+
 ## Supported Providers
 
-- **Anthropic Claude** - Full support including cache prompting
+- **Venice.ai** - Primary provider with credit tracking and automatic fallback
+- **Anthropic Claude** - Full support including cache prompting (fallback)
 - **OpenAI** - Basic support (no cache prompting)
 - **Ollama** - Local models for preprocessing
 - **Custom** - Any OpenAI-compatible API

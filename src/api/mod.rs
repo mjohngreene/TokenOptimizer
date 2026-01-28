@@ -3,10 +3,12 @@
 mod client;
 mod request;
 mod response;
+mod venice;
 
 pub use client::ApiAgent;
 pub use request::{ApiRequest, ContextItem, ContextType, Message, RequestConstraints, Role};
 pub use response::{ApiResponse, StopReason, TokenUsage};
+pub use venice::{VeniceBalance, VeniceConfig, VeniceModel, VeniceProvider};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
