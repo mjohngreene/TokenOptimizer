@@ -1,0 +1,193 @@
+# TokenOptimizer
+
+A Rust library and CLI tool for coordinating code agents with a primary focus on **minimizing token consumption**. This project helps reduce API costs when working with LLM-based coding assistants by optimizing prompts and leveraging cache prompting.
+
+## Features
+
+### Prompt Optimization
+- **Whitespace stripping** - Remove unnecessary whitespace while preserving code structure
+- **Comment removal** - Strip comments from code context
+- **Context truncation** - Smart truncation at logical boundaries (function/class definitions)
+- **Signature extraction** - Extract only function/class signatures for minimal context
+- **Deduplication** - Remove duplicate content
+- **Relevance filtering** - Use local LLM to score and filter context by relevance
+
+### Cache Prompting
+Maximize cache hit rates with providers like Anthropic Claude:
+- **Automatic content classification** - Categorize content as Static/SemiStatic/Dynamic/Volatile
+- **Optimal prompt structuring** - Reorder content to put cacheable items first
+- **Cache breakpoint management** - Strategic placement of cache breakpoints
+- **Cache metrics tracking** - Monitor hit rates and cost savings
+
+### Local LLM Preprocessing
+Use small local models (via Ollama) to preprocess before expensive API calls:
+- Context compression
+- Relevance scoring
+- Prompt optimization
+- Key information extraction
+
+### Metrics & Tracking
+- Token usage tracking
+- Cost estimation (with cache-aware pricing)
+- Compression ratio statistics
+- Per-session metrics
+
+## Installation
+
+### Prerequisites
+- Rust 1.70+
+- (Optional) [Ollama](https://ollama.ai/) for local LLM preprocessing
+
+### Build from source
+```bash
+git clone https://github.com/YOUR_USERNAME/TokenOptimizer.git
+cd TokenOptimizer
+cargo build --release
+```
+
+## Usage
+
+### CLI Commands
+
+#### Optimize a prompt
+```bash
+token-optimizer optimize \
+  --input "Fix the authentication bug in the login handler" \
+  --context src/auth.rs \
+  --context src/handlers/login.rs \
+  --target 4000
+```
+
+#### Analyze cache optimization potential
+```bash
+token-optimizer cache-optimize \
+  --task "Implement the new feature" \
+  --context types.d.ts \
+  --context src/feature.ts \
+  --system prompts/system.txt \
+  --static-indices "0,1"
+```
+
+#### Benchmark optimization strategies
+```bash
+token-optimizer benchmark \
+  --input task.txt \
+  --context src/main.rs
+```
+
+#### Check local LLM availability
+```bash
+token-optimizer check-local --url http://localhost:11434
+```
+
+#### Interactive mode
+```bash
+token-optimizer interactive
+```
+
+### As a Library
+
+```rust
+use token_optimizer::{
+    api::{ApiRequest, ContextItem, ContextType},
+    cache::{CacheConfig, CacheOptimizer},
+    optimization::{OptimizationConfig, PromptOptimizer, StrategyType},
+};
+
+// Create a request
+let request = ApiRequest::new("Fix the bug in auth.rs".to_string())
+    .with_cached_system("You are a coding assistant...".to_string())
+    .with_context(vec![
+        ContextItem {
+            name: "types.rs".to_string(),
+            content: "pub struct User { ... }".to_string(),
+            item_type: ContextType::File,
+            relevance: None,
+            cache_control: None,
+            is_static: true,  // Mark as cacheable
+        },
+    ]);
+
+// Optimize for token reduction
+let config = OptimizationConfig {
+    target_tokens: Some(4000),
+    strategies: vec![
+        StrategyType::StripWhitespace,
+        StrategyType::RemoveComments,
+        StrategyType::TruncateContext,
+    ],
+    ..Default::default()
+};
+let optimizer = PromptOptimizer::new(config, None);
+let (optimized, stats) = optimizer.optimize(request).await?;
+
+println!("Tokens saved: {}", stats.tokens_saved);
+```
+
+### Cache Optimization
+
+```rust
+use token_optimizer::cache::{CacheConfig, CacheOptimizer};
+
+let mut cache_optimizer = CacheOptimizer::new(CacheConfig::default());
+let optimized = cache_optimizer.optimize_request(request);
+
+println!("Static tokens: {}", optimized.static_tokens);
+println!("Cache eligible: {}", optimized.static_tokens >= 1024);
+println!("Est. savings: {}", optimized.estimated_cache_savings);
+```
+
+## Cache Prompting Strategy
+
+To maximize cache efficiency with Anthropic's Claude:
+
+1. **Structure prompts correctly**: Static content must come first
+   - System prompt (cached)
+   - Documentation/type definitions (cached)
+   - Semi-static context (project structure)
+   - Dynamic context (current file, errors)
+   - User task (always dynamic)
+
+2. **Meet minimum thresholds**: Claude requires ~1024 tokens minimum for caching
+
+3. **Use cache breakpoints**: Mark boundaries where cache can be reused
+
+4. **Track what's cached**: Use `CacheTracker` to monitor hit rates
+
+## Configuration
+
+### Optimization Config
+```rust
+OptimizationConfig {
+    target_tokens: Some(4000),      // Target token budget
+    strategies: vec![...],           // Strategies to apply
+    use_local_llm: true,            // Use Ollama for preprocessing
+    preserve_code_blocks: true,     // Don't strip code formatting
+}
+```
+
+### Cache Config
+```rust
+CacheConfig {
+    min_cache_tokens: 1024,         // Minimum for caching
+    max_breakpoints: 4,             // Max cache breakpoints
+    auto_reorder: true,             // Reorder for optimal caching
+    pad_to_minimum: false,          // Pad small sections
+    tokens_per_char: 0.25,          // Estimation ratio
+}
+```
+
+## Supported Providers
+
+- **Anthropic Claude** - Full support including cache prompting
+- **OpenAI** - Basic support (no cache prompting)
+- **Ollama** - Local models for preprocessing
+- **Custom** - Any OpenAI-compatible API
+
+## License
+
+MIT
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
