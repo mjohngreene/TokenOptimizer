@@ -3,6 +3,7 @@
 mod strategies;
 
 pub use strategies::{OptimizationStrategy, PromptOptimizer};
+pub(crate) use strategies::{count_tokens, smart_truncate};
 
 use serde::{Deserialize, Serialize};
 
@@ -45,6 +46,35 @@ pub enum StrategyType {
     ExtractSignatures,
     /// Deduplicate similar content
     Deduplicate,
+}
+
+impl OptimizationConfig {
+    /// Build an OptimizationConfig from the config-file OptimizationSettings
+    pub fn from_settings(settings: &crate::config::OptimizationSettings) -> Self {
+        let strategies = settings
+            .strategies
+            .iter()
+            .filter_map(|s| match s.as_str() {
+                "strip_whitespace" => Some(StrategyType::StripWhitespace),
+                "remove_comments" => Some(StrategyType::RemoveComments),
+                "truncate_context" => Some(StrategyType::TruncateContext),
+                "abbreviate" => Some(StrategyType::Abbreviate),
+                "llm_compress" => Some(StrategyType::LlmCompress),
+                "relevance_filter" => Some(StrategyType::RelevanceFilter),
+                "extract_signatures" => Some(StrategyType::ExtractSignatures),
+                "deduplicate" => Some(StrategyType::Deduplicate),
+                _ => None,
+            })
+            .collect();
+
+        Self {
+            target_tokens: Some(settings.target_tokens),
+            strategies,
+            use_local_llm: settings.use_local_llm,
+            preserve_code_blocks: settings.preserve_code_blocks,
+            keyword_weight: default_keyword_weight(),
+        }
+    }
 }
 
 impl Default for OptimizationConfig {

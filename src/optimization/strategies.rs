@@ -320,7 +320,7 @@ pub trait OptimizationStrategy: Send + Sync {
 // ─── Token counting ─────────────────────────────────────────────────────────
 
 /// Count tokens using tiktoken cl100k_base; falls back to len()/4
-fn count_tokens(text: &str) -> usize {
+pub(crate) fn count_tokens(text: &str) -> usize {
     tiktoken_rs::cl100k_base()
         .map(|bpe| bpe.encode_with_special_tokens(text).len())
         .unwrap_or_else(|_| text.len() / 4)
@@ -397,7 +397,7 @@ fn find_best_boundary(text: &str, max_pos: usize) -> usize {
     max_pos.min(text.len())
 }
 
-fn smart_truncate(text: &str, max_chars: usize) -> String {
+pub(crate) fn smart_truncate(text: &str, max_chars: usize) -> String {
     if text.len() <= max_chars {
         return text.to_string();
     }

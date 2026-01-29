@@ -35,6 +35,7 @@ impl Default for LocalAgentConfig {
 }
 
 /// Local LLM agent using Ollama
+#[derive(Clone)]
 pub struct LocalAgent {
     config: LocalAgentConfig,
     client: Client,

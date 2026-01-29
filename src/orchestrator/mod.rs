@@ -12,6 +12,7 @@ pub use session::{Session, SessionConfig, SessionState};
 use crate::api::{ApiError, ApiProvider, ApiRequest, ApiResponse, VeniceProvider};
 use crate::cache::CacheTracker;
 use crate::metrics::MetricsTracker;
+use crate::optimization::{smart_truncate, OptimizationConfig, PromptOptimizer, StrategyType};
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -207,22 +208,47 @@ impl<F: FallbackProvider> Orchestrator<F> {
     }
 
     async fn execute_fallback_with_handoff(&self, request: ApiRequest) -> Result<ApiResponse, ApiError> {
-        // Build handoff context
+        // Build handoff context with compressed session summary
         let session_history = self.session_context.read().await.clone();
 
         let handoff_note = if self.config.preserve_context && !session_history.is_empty() {
+            let combined = session_history.join("\n---\n");
+            // Compress to ~2000 chars to avoid blowing up the fallback budget
+            let summary = smart_truncate(&combined, 2000);
             format!(
-                "\n\n[Session handoff from Venice.ai - {} previous responses in context]\n",
-                session_history.len()
+                "\n\n[Session handoff from Venice.ai - {} previous responses]\nSummary:\n{}\n",
+                session_history.len(),
+                summary
             )
         } else {
             String::new()
         };
 
-        // Modify request to include handoff context if needed
+        // Modify request to include handoff context
         let mut handoff_request = request;
         if !handoff_note.is_empty() {
             handoff_request.task = format!("{}{}", handoff_note, handoff_request.task);
+        }
+
+        // Optimize the request before sending to fallback
+        let fallback_config = OptimizationConfig {
+            strategies: vec![
+                StrategyType::StripWhitespace,
+                StrategyType::RemoveComments,
+                StrategyType::TruncateContext,
+                StrategyType::Deduplicate,
+            ],
+            ..OptimizationConfig::default()
+        };
+        let optimizer = PromptOptimizer::new(fallback_config, None);
+        if let Ok((optimized, stats)) = optimizer.optimize(handoff_request.clone()).await {
+            if stats.tokens_saved > 0 {
+                info!(
+                    "Fallback handoff optimized: {} -> {} tokens (saved {})",
+                    stats.original_tokens, stats.optimized_tokens, stats.tokens_saved
+                );
+                handoff_request = optimized;
+            }
         }
 
         self.execute_fallback(handoff_request).await

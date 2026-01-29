@@ -17,6 +17,7 @@ use crate::api::{
 };
 use crate::config::Config;
 use crate::metrics::MetricsTracker;
+use crate::optimization::{count_tokens, OptimizationConfig, PromptOptimizer, StrategyType};
 
 use commands::{parse_command, render_help, ContextAction, SlashCommand};
 use prompt::PromptHandler;
@@ -62,8 +63,12 @@ pub struct InteractiveShell {
     conversation: Vec<Message>,
     /// Context files attached to the session
     context: Vec<ContextItem>,
+    /// Prompt optimizer for reducing token usage
+    optimizer: PromptOptimizer,
     /// Metrics tracker
     metrics: MetricsTracker,
+    /// Maximum token budget for conversation history
+    max_history_tokens: usize,
     /// Total tokens in this session
     session_tokens: u64,
     /// Number of turns completed
@@ -94,6 +99,10 @@ impl InteractiveShell {
             None
         };
 
+        // Build prompt optimizer from config settings
+        let opt_config = OptimizationConfig::from_settings(&config.optimization);
+        let optimizer = PromptOptimizer::new(opt_config, local_agent.clone());
+
         Ok(Self {
             config,
             provider,
@@ -104,7 +113,9 @@ impl InteractiveShell {
             prompt_handler: PromptHandler::new(),
             conversation: Vec::new(),
             context: Vec::new(),
+            optimizer,
             metrics: MetricsTracker::new(),
+            max_history_tokens: 8000,
             session_tokens: 0,
             turn_count: 0,
         })
@@ -326,6 +337,9 @@ impl InteractiveShell {
             request = request.with_context(self.context.clone());
         }
 
+        // Auto-compact conversation history if over token budget
+        self.auto_compact_history();
+
         // Add conversation history
         request.messages = self.conversation.clone();
 
@@ -346,7 +360,24 @@ impl InteractiveShell {
             }
         }
 
-        // Step 2: Start thinking spinner and try primary provider
+        // Step 2: Run prompt optimizer
+        match self.optimizer.optimize(request.clone()).await {
+            Ok((optimized, stats)) => {
+                if stats.tokens_saved > 0 {
+                    self.renderer.render_info(&format!(
+                        "Optimized: {} -> {} tokens (saved {})",
+                        stats.original_tokens, stats.optimized_tokens, stats.tokens_saved
+                    ));
+                }
+                request = optimized;
+            }
+            Err(e) => {
+                self.renderer
+                    .render_info(&format!("Optimization skipped: {}", e));
+            }
+        }
+
+        // Step 3: Start thinking spinner and try primary provider
         let mut spinner = ThinkingSpinner::new();
         spinner.start("Thinking...");
 
@@ -355,7 +386,7 @@ impl InteractiveShell {
             ActiveProvider::Api(agent) => agent.send_streaming(request.clone()).await,
         };
 
-        // Step 3: If primary fails and fallback exists, try fallback
+        // Step 4: If primary fails and fallback exists, try fallback
         let mut rx = match stream_result {
             Ok(rx) => rx,
             Err(e) => {
@@ -366,13 +397,41 @@ impl InteractiveShell {
                         self.provider.name(),
                         e
                     ));
+
+                    // Re-optimize with tighter budget for fallback
+                    let mut fallback_request = request;
+                    let fallback_config = OptimizationConfig {
+                        strategies: vec![
+                            StrategyType::StripWhitespace,
+                            StrategyType::RemoveComments,
+                            StrategyType::TruncateContext,
+                            StrategyType::Deduplicate,
+                        ],
+                        ..OptimizationConfig::from_settings(&self.config.optimization)
+                    };
+                    let fallback_optimizer =
+                        PromptOptimizer::new(fallback_config, self.local_agent.clone());
+                    if let Ok((optimized, stats)) =
+                        fallback_optimizer.optimize(fallback_request.clone()).await
+                    {
+                        if stats.tokens_saved > 0 {
+                            self.renderer.render_info(&format!(
+                                "Fallback re-optimized: saved {} more tokens",
+                                stats.tokens_saved
+                            ));
+                        }
+                        fallback_request = optimized;
+                    }
+
                     let mut spinner = ThinkingSpinner::new();
                     spinner.start("Trying fallback...");
                     let fallback_result = match self.fallback.as_ref().unwrap() {
                         ActiveProvider::Venice(provider) => {
-                            provider.send_streaming(request).await
+                            provider.send_streaming(fallback_request).await
                         }
-                        ActiveProvider::Api(agent) => agent.send_streaming(request).await,
+                        ActiveProvider::Api(agent) => {
+                            agent.send_streaming(fallback_request).await
+                        }
                     };
                     match fallback_result {
                         Ok(rx) => {
@@ -676,29 +735,52 @@ impl InteractiveShell {
         Ok(())
     }
 
+    /// Count total tokens in conversation history
+    fn history_token_count(&self) -> usize {
+        self.conversation
+            .iter()
+            .map(|m| count_tokens(&m.content))
+            .sum()
+    }
+
+    /// Auto-compact history when it exceeds the token budget
+    fn auto_compact_history(&mut self) {
+        if self.history_token_count() > self.max_history_tokens {
+            self.compact_history();
+        }
+    }
+
     /// Compact conversation history to reduce token usage
+    ///
+    /// Strategy: keep first exchange (context), summarize middle to
+    /// user-only messages, keep last 2 full exchanges.
     fn compact_history(&mut self) {
         if self.conversation.len() <= 4 {
             return;
         }
 
-        // Keep the first exchange and the last 2 exchanges
         let mut compacted = Vec::new();
 
-        // Keep first pair
+        // Keep first exchange (2 messages)
         if self.conversation.len() >= 2 {
             compacted.push(self.conversation[0].clone());
             compacted.push(self.conversation[1].clone());
         }
 
-        // Keep last 4 messages (2 exchanges)
-        let start = self.conversation.len().saturating_sub(4);
-        for msg in &self.conversation[start..] {
-            // Avoid duplicating the first pair
-            if compacted.len() < 2 || !compacted.iter().any(|m: &Message| m.content == msg.content)
-            {
-                compacted.push(msg.clone());
+        // Middle messages: keep only user messages (drop assistant responses)
+        let middle_end = self.conversation.len().saturating_sub(4);
+        if middle_end > 2 {
+            for msg in &self.conversation[2..middle_end] {
+                if msg.role == Role::User {
+                    compacted.push(msg.clone());
+                }
             }
+        }
+
+        // Keep last 2 full exchanges (4 messages)
+        let last_start = self.conversation.len().saturating_sub(4);
+        for msg in &self.conversation[last_start..] {
+            compacted.push(msg.clone());
         }
 
         self.conversation = compacted;
