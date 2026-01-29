@@ -1,9 +1,13 @@
 //! Generic API client for coding agents
 
+use super::sse::{parse_sse_line, SseFormat};
+use super::streaming::{StreamChunk, StreamingProvider};
 use super::{ApiConfig, ApiError, ApiProvider, ApiRequest, ApiResponse, ProviderType, TokenUsage};
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use reqwest::Client;
 use serde_json::{json, Value};
+use tokio::sync::mpsc;
 
 /// Generic API agent that can work with multiple providers
 pub struct ApiAgent {
@@ -53,6 +57,19 @@ impl ApiAgent {
             messages.push(json!({
                 "role": "user",
                 "content": content_blocks
+            }));
+        }
+
+        // Insert conversation history between context and current task
+        for msg in &request.messages {
+            let role = match msg.role {
+                super::Role::User => "user",
+                super::Role::Assistant => "assistant",
+                super::Role::System => continue, // System messages handled separately
+            };
+            messages.push(json!({
+                "role": role,
+                "content": msg.content
             }));
         }
 
@@ -113,6 +130,19 @@ impl ApiAgent {
             messages.push(json!({
                 "role": "user",
                 "content": format!("Context:\n{}", context_text)
+            }));
+        }
+
+        // Insert conversation history between context and current task
+        for msg in &request.messages {
+            let role = match msg.role {
+                super::Role::User => "user",
+                super::Role::Assistant => "assistant",
+                super::Role::System => "system",
+            };
+            messages.push(json!({
+                "role": role,
+                "content": msg.content
             }));
         }
 
@@ -270,5 +300,140 @@ impl ApiProvider for ApiAgent {
 
     fn provider_type(&self) -> ProviderType {
         self.config.provider.clone()
+    }
+}
+
+#[async_trait]
+impl StreamingProvider for ApiAgent {
+    async fn send_streaming(
+        &self,
+        request: ApiRequest,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ApiError> {
+        let (sse_format, url, mut body, auth_header) = match self.config.provider {
+            ProviderType::Claude => {
+                let url = self
+                    .config
+                    .base_url
+                    .clone()
+                    .unwrap_or_else(|| "https://api.anthropic.com/v1/messages".to_string());
+                let body = self.build_claude_request(&request);
+                (
+                    SseFormat::Anthropic,
+                    url,
+                    body,
+                    ("x-api-key".to_string(), self.config.api_key.clone()),
+                )
+            }
+            ProviderType::OpenAI => {
+                let url = self
+                    .config
+                    .base_url
+                    .clone()
+                    .unwrap_or_else(|| "https://api.openai.com/v1/chat/completions".to_string());
+                let body = self.build_openai_request(&request);
+                (
+                    SseFormat::OpenAI,
+                    url,
+                    body,
+                    (
+                        "Authorization".to_string(),
+                        format!("Bearer {}", self.config.api_key),
+                    ),
+                )
+            }
+            ProviderType::Ollama => {
+                let url = self
+                    .config
+                    .base_url
+                    .clone()
+                    .unwrap_or_else(|| "http://localhost:11434/api/chat".to_string());
+                let body = self.build_openai_request(&request);
+                (
+                    SseFormat::Ollama,
+                    url,
+                    body,
+                    ("Authorization".to_string(), String::new()),
+                )
+            }
+            ProviderType::Custom => {
+                let url = self
+                    .config
+                    .base_url
+                    .clone()
+                    .ok_or_else(|| ApiError::Provider("Custom provider requires base_url".into()))?;
+                let body = self.build_openai_request(&request);
+                (
+                    SseFormat::OpenAI,
+                    url,
+                    body,
+                    (
+                        "Authorization".to_string(),
+                        format!("Bearer {}", self.config.api_key),
+                    ),
+                )
+            }
+        };
+
+        // Enable streaming in the request body
+        body["stream"] = json!(true);
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("anthropic-version", "2023-06-01")
+            .header(&auth_header.0, &auth_header.1)
+            .json(&body)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(ApiError::Provider(format!("{}: {}", status, error_text)));
+        }
+
+        let (tx, rx) = mpsc::channel(64);
+
+        tokio::spawn(async move {
+            let mut stream = response.bytes_stream();
+            let mut buffer = String::new();
+
+            while let Some(chunk_result) = stream.next().await {
+                match chunk_result {
+                    Ok(bytes) => {
+                        buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+                        // Process complete lines
+                        while let Some(newline_pos) = buffer.find('\n') {
+                            let line = buffer[..newline_pos].to_string();
+                            buffer = buffer[newline_pos + 1..].to_string();
+
+                            if let Some(chunk) = parse_sse_line(&line, sse_format) {
+                                let is_done = matches!(chunk, StreamChunk::Done(_));
+                                let is_error = matches!(chunk, StreamChunk::Error(_));
+                                if tx.send(chunk).await.is_err() {
+                                    return; // Receiver dropped
+                                }
+                                if is_done || is_error {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx
+                            .send(StreamChunk::Error(format!("Stream error: {}", e)))
+                            .await;
+                        return;
+                    }
+                }
+            }
+
+            // If stream ends without a Done chunk, send one
+            let _ = tx.send(StreamChunk::Done(TokenUsage::default())).await;
+        });
+
+        Ok(rx)
     }
 }

@@ -10,7 +10,7 @@ license = "MIT"
 tokio = { version = "1", features = ["full"] }
 
 # HTTP client for API calls (using rustls to avoid OpenSSL dependency)
-reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls", "stream"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -33,6 +33,15 @@ tiktoken-rs = "0.5"
 # Configuration
 toml = "0.8"
 dirs = "5"
+
+# Terminal UI
+crossterm = "0.28"
+termimad = "0.30"
+indicatif = "0.17"
+
+# Streaming support
+tokio-stream = "0.1"
+futures-util = "0.3"
 
 # Async trait support
 async-trait = "0.1"

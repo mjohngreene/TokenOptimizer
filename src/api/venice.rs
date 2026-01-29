@@ -1,13 +1,16 @@
 //! Venice.ai API provider with credit tracking and fallback support
 
+use super::sse::{parse_sse_line, SseFormat};
+use super::streaming::{StreamChunk, StreamingProvider};
 use super::{ApiError, ApiProvider, ApiRequest, ApiResponse, ProviderType, TokenUsage};
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, RwLock};
 
 /// Venice.ai specific configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -189,6 +192,19 @@ impl VeniceProvider {
             }));
         }
 
+        // Insert conversation history between context and current task
+        for msg in &request.messages {
+            let role = match msg.role {
+                super::Role::User => "user",
+                super::Role::Assistant => "assistant",
+                super::Role::System => "system",
+            };
+            messages.push(json!({
+                "role": role,
+                "content": msg.content
+            }));
+        }
+
         // Add the task
         messages.push(json!({
             "role": "user",
@@ -291,6 +307,93 @@ impl ApiProvider for VeniceProvider {
 
     fn provider_type(&self) -> ProviderType {
         ProviderType::Custom // Venice is a custom provider
+    }
+}
+
+#[async_trait]
+impl StreamingProvider for VeniceProvider {
+    async fn send_streaming(
+        &self,
+        request: ApiRequest,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ApiError> {
+        if self.is_exhausted() {
+            return Err(ApiError::Provider(
+                "Venice credits exhausted - fallback required".to_string(),
+            ));
+        }
+
+        let url = format!("{}/chat/completions", self.base_url());
+        let mut body = self.build_request(&request);
+        body["stream"] = json!(true);
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.config.api_key))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await?;
+
+        // Update balance from headers before consuming stream body
+        self.update_balance_from_headers(&response).await;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            if status.as_u16() == 429
+                && (error_text.contains("insufficient")
+                    || error_text.contains("quota")
+                    || error_text.contains("balance"))
+            {
+                self.credits_exhausted.store(true, Ordering::SeqCst);
+                return Err(ApiError::Provider(
+                    "Venice credits exhausted - fallback required".to_string(),
+                ));
+            }
+            return Err(ApiError::Provider(format!("{}: {}", status, error_text)));
+        }
+
+        let (tx, rx) = mpsc::channel(64);
+
+        tokio::spawn(async move {
+            let mut stream = response.bytes_stream();
+            let mut buffer = String::new();
+
+            while let Some(chunk_result) = stream.next().await {
+                match chunk_result {
+                    Ok(bytes) => {
+                        buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+                        while let Some(newline_pos) = buffer.find('\n') {
+                            let line = buffer[..newline_pos].to_string();
+                            buffer = buffer[newline_pos + 1..].to_string();
+
+                            if let Some(chunk) = parse_sse_line(&line, SseFormat::OpenAI) {
+                                let is_done = matches!(chunk, StreamChunk::Done(_));
+                                let is_error = matches!(chunk, StreamChunk::Error(_));
+                                if tx.send(chunk).await.is_err() {
+                                    return;
+                                }
+                                if is_done || is_error {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx
+                            .send(StreamChunk::Error(format!("Stream error: {}", e)))
+                            .await;
+                        return;
+                    }
+                }
+            }
+
+            let _ = tx.send(StreamChunk::Done(TokenUsage::default())).await;
+        });
+
+        Ok(rx)
     }
 }
 

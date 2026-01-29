@@ -18,6 +18,7 @@ pub mod config;
 pub mod metrics;
 pub mod optimization;
 pub mod orchestrator;
+pub mod tui;
 
 pub use agents::{LocalAgent, LocalAgentConfig, PreprocessingAgent};
 pub use api::{ApiAgent, ApiRequest, ApiResponse, VeniceConfig, VeniceProvider};

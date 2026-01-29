@@ -507,93 +507,12 @@ async fn check_local(url: &str) -> Result<()> {
 }
 
 async fn run_interactive() -> Result<()> {
-    use std::io::{self, BufRead, Write};
+    use token_optimizer::config::Config;
+    use token_optimizer::tui::InteractiveShell;
 
-    println!("TokenOptimizer Interactive Mode");
-    println!("================================");
-    println!("Commands:");
-    println!("  /optimize <text>  - Optimize the given text");
-    println!("  /context <file>   - Add a context file");
-    println!("  /clear            - Clear context");
-    println!("  /stats            - Show statistics");
-    println!("  /quit             - Exit");
-    println!();
-
-    let stdin = io::stdin();
-    let mut context: Vec<ContextItem> = Vec::new();
-    let tracker = MetricsTracker::new();
-
-    loop {
-        print!("> ");
-        io::stdout().flush()?;
-
-        let mut line = String::new();
-        stdin.lock().read_line(&mut line)?;
-        let line = line.trim();
-
-        if line.is_empty() {
-            continue;
-        }
-
-        if line.starts_with("/quit") {
-            break;
-        }
-
-        if line.starts_with("/clear") {
-            context.clear();
-            println!("Context cleared.");
-            continue;
-        }
-
-        if line.starts_with("/stats") {
-            println!("{}", tracker.summary());
-            continue;
-        }
-
-        if let Some(file) = line.strip_prefix("/context ") {
-            match std::fs::read_to_string(file) {
-                Ok(content) => {
-                    context.push(ContextItem {
-                        name: file.to_string(),
-                        content,
-                        item_type: ContextType::File,
-                        relevance: None,
-                        cache_control: None,
-                        is_static: false,
-                    });
-                    println!("Added context: {}", file);
-                }
-                Err(e) => println!("Error reading file: {}", e),
-            }
-            continue;
-        }
-
-        if let Some(text) = line.strip_prefix("/optimize ") {
-            let request = ApiRequest::new(text.to_string()).with_context(context.clone());
-
-            let config = OptimizationConfig::default();
-            let optimizer = PromptOptimizer::new(config, None);
-
-            match optimizer.optimize(request).await {
-                Ok((optimized, stats)) => {
-                    println!("\nOptimized task: {}", optimized.task);
-                    println!("Context items: {}", optimized.context.len());
-                    println!(
-                        "Tokens: {} -> {} ({:.1}% of original)",
-                        stats.original_tokens,
-                        stats.optimized_tokens,
-                        stats.compression_ratio * 100.0
-                    );
-                }
-                Err(e) => println!("Optimization error: {}", e),
-            }
-            continue;
-        }
-
-        println!("Unknown command. Type /quit to exit.");
-    }
-
-    Ok(())
+    let config = Config::load()?.with_env_overrides();
+    let mut shell = InteractiveShell::new(config).await?;
+    shell.run().await
 }
 
 async fn run_cache_optimize(
