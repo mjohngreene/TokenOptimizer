@@ -757,38 +757,26 @@ fn config_show(section: Option<String>) -> Result<()> {
 
     let display = if let Some(sec) = section {
         match sec.to_lowercase().as_str() {
-            "venice" => toml::to_string_pretty(&config.venice)?,
-            "claude" => toml::to_string_pretty(&config.claude)?,
-            "openai" => {
-                if let Some(openai) = &config.openai {
-                    toml::to_string_pretty(openai)?
-                } else {
-                    "OpenAI not configured".to_string()
-                }
-            }
+            "primary" | "venice" => toml::to_string_pretty(&config.primary)?,
+            "fallback" | "claude" => toml::to_string_pretty(&config.fallback)?,
             "local" => toml::to_string_pretty(&config.local)?,
             "orchestrator" => toml::to_string_pretty(&config.orchestrator)?,
             "optimization" => toml::to_string_pretty(&config.optimization)?,
             "cache" => toml::to_string_pretty(&config.cache)?,
             _ => {
                 println!("Unknown section: {}", sec);
-                println!("Available: venice, claude, openai, local, orchestrator, optimization, cache");
+                println!("Available: primary, fallback, local, orchestrator, optimization, cache");
                 return Ok(());
             }
         }
     } else {
         // Mask API keys in display
         let mut display_config = config.clone();
-        if display_config.venice.api_key.is_some() {
-            display_config.venice.api_key = Some("***".to_string());
+        if display_config.primary.api_key.is_some() {
+            display_config.primary.api_key = Some("***".to_string());
         }
-        if display_config.claude.api_key.is_some() {
-            display_config.claude.api_key = Some("***".to_string());
-        }
-        if let Some(ref mut openai) = display_config.openai {
-            if openai.api_key.is_some() {
-                openai.api_key = Some("***".to_string());
-            }
+        if display_config.fallback.api_key.is_some() {
+            display_config.fallback.api_key = Some("***".to_string());
         }
         toml::to_string_pretty(&display_config)?
     };
@@ -810,38 +798,42 @@ fn config_set(key: &str, value: &str) -> Result<()> {
 
     let parts: Vec<&str> = key.split('.').collect();
     if parts.len() != 2 {
-        println!("Invalid key format. Use: section.key (e.g., venice.model)");
+        println!("Invalid key format. Use: section.key (e.g., primary.model)");
         return Ok(());
     }
 
     let (section, field) = (parts[0], parts[1]);
 
     match section {
-        "venice" => match field {
-            "api_key" => config.venice.api_key = Some(value.to_string()),
-            "model" => config.venice.model = value.to_string(),
-            "base_url" => config.venice.base_url = value.to_string(),
-            "min_balance_usd" => config.venice.min_balance_usd = value.parse()?,
-            "min_balance_diem" => config.venice.min_balance_diem = value.parse()?,
-            "max_tokens" => config.venice.max_tokens = value.parse()?,
-            "temperature" => config.venice.temperature = value.parse()?,
-            "enabled" => config.venice.enabled = value.parse()?,
+        "primary" | "venice" => match field {
+            "api_key" => config.primary.api_key = Some(value.to_string()),
+            "provider" => config.primary.provider = value.to_string(),
+            "model" => config.primary.model = value.to_string(),
+            "base_url" => config.primary.base_url = value.to_string(),
+            "min_balance_usd" => config.primary.min_balance_usd = value.parse()?,
+            "min_balance_diem" => config.primary.min_balance_diem = value.parse()?,
+            "max_tokens" => config.primary.max_tokens = value.parse()?,
+            "temperature" => config.primary.temperature = value.parse()?,
+            "enabled" => config.primary.enabled = value.parse()?,
             _ => {
-                println!("Unknown venice field: {}", field);
+                println!("Unknown primary field: {}", field);
+                println!("Available: api_key, provider, model, base_url, min_balance_usd, min_balance_diem, max_tokens, temperature, enabled");
                 return Ok(());
             }
         },
-        "claude" => match field {
-            "api_key" => config.claude.api_key = Some(value.to_string()),
-            "model" => config.claude.model = value.to_string(),
-            "base_url" => config.claude.base_url = value.to_string(),
-            "max_tokens" => config.claude.max_tokens = value.parse()?,
-            "temperature" => config.claude.temperature = value.parse()?,
-            "use_cli_fallback" => config.claude.use_cli_fallback = value.parse()?,
-            "cli_path" => config.claude.cli_path = Some(value.to_string()),
-            "enabled" => config.claude.enabled = value.parse()?,
+        "fallback" | "claude" => match field {
+            "api_key" => config.fallback.api_key = Some(value.to_string()),
+            "provider" => config.fallback.provider = value.to_string(),
+            "model" => config.fallback.model = value.to_string(),
+            "base_url" => config.fallback.base_url = value.to_string(),
+            "max_tokens" => config.fallback.max_tokens = value.parse()?,
+            "temperature" => config.fallback.temperature = value.parse()?,
+            "use_cli" => config.fallback.use_cli = value.parse()?,
+            "cli_path" => config.fallback.cli_path = Some(value.to_string()),
+            "enabled" => config.fallback.enabled = value.parse()?,
             _ => {
-                println!("Unknown claude field: {}", field);
+                println!("Unknown fallback field: {}", field);
+                println!("Available: api_key, provider, model, base_url, max_tokens, temperature, use_cli, cli_path, enabled");
                 return Ok(());
             }
         },
@@ -856,8 +848,6 @@ fn config_set(key: &str, value: &str) -> Result<()> {
             }
         },
         "orchestrator" => match field {
-            "primary_provider" => config.orchestrator.primary_provider = value.to_string(),
-            "fallback_provider" => config.orchestrator.fallback_provider = value.to_string(),
             "max_retries" => config.orchestrator.max_retries = value.parse()?,
             "preserve_context" => config.orchestrator.preserve_context = value.parse()?,
             _ => {
@@ -885,7 +875,7 @@ fn config_set(key: &str, value: &str) -> Result<()> {
         },
         _ => {
             println!("Unknown section: {}", section);
-            println!("Available: venice, claude, local, orchestrator, optimization, cache");
+            println!("Available: primary, fallback, local, orchestrator, optimization, cache");
             return Ok(());
         }
     }
@@ -918,23 +908,23 @@ fn config_validate() -> Result<()> {
             // Show what's configured
             println!("Configured providers:");
 
-            let venice_key = config.venice_api_key();
-            if config.venice.enabled && venice_key.is_some() {
-                println!("  Venice.ai: enabled (model: {})", config.venice.model);
-            } else if config.venice.enabled {
-                println!("  Venice.ai: enabled but NO API KEY");
+            let primary_key = config.primary_api_key();
+            if config.primary.enabled && primary_key.is_some() {
+                println!("  Primary ({}): enabled (model: {})", config.primary.provider, config.primary.model);
+            } else if config.primary.enabled {
+                println!("  Primary ({}): enabled but NO API KEY", config.primary.provider);
             } else {
-                println!("  Venice.ai: disabled");
+                println!("  Primary: disabled");
             }
 
-            let claude_key = config.claude_api_key();
-            if config.claude.enabled && (claude_key.is_some() || config.claude.use_cli_fallback) {
-                let method = if config.claude.use_cli_fallback { "CLI" } else { "API" };
-                println!("  Claude: enabled via {} (model: {})", method, config.claude.model);
-            } else if config.claude.enabled {
-                println!("  Claude: enabled but NO API KEY and CLI fallback disabled");
+            let fallback_key = config.fallback_api_key();
+            if config.fallback.enabled && (fallback_key.is_some() || (config.fallback.provider == "claude" && config.fallback.use_cli)) {
+                let method = if config.fallback.provider == "claude" && config.fallback.use_cli { "CLI" } else { "API" };
+                println!("  Fallback ({}): enabled via {} (model: {})", config.fallback.provider, method, config.fallback.model);
+            } else if config.fallback.enabled {
+                println!("  Fallback ({}): enabled but NO API KEY", config.fallback.provider);
             } else {
-                println!("  Claude: disabled");
+                println!("  Fallback: disabled");
             }
 
             if config.local.enabled {
@@ -993,15 +983,14 @@ async fn config_set_key(provider: &str) -> Result<()> {
     let mut config = Config::load()?;
 
     match provider.to_lowercase().as_str() {
-        "venice" => config.venice.api_key = Some(key.to_string()),
-        "claude" | "anthropic" => config.claude.api_key = Some(key.to_string()),
+        "venice" => config.primary.api_key = Some(key.to_string()),
+        "claude" | "anthropic" => {
+            config.fallback.provider = "claude".to_string();
+            config.fallback.api_key = Some(key.to_string());
+        }
         "openai" => {
-            if config.openai.is_none() {
-                config.openai = Some(token_optimizer::config::OpenAISettings::default());
-            }
-            if let Some(ref mut openai) = config.openai {
-                openai.api_key = Some(key.to_string());
-            }
+            config.fallback.provider = "openai".to_string();
+            config.fallback.api_key = Some(key.to_string());
         }
         _ => {}
     }

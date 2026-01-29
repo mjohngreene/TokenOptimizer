@@ -31,16 +31,13 @@ pub enum ConfigError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// Venice.ai configuration
-    pub venice: VeniceSettings,
+    /// Primary provider configuration (Venice.ai)
+    pub primary: PrimaryProviderSettings,
 
-    /// Claude/Anthropic configuration
-    pub claude: ClaudeSettings,
+    /// Fallback provider configuration
+    pub fallback: FallbackProviderSettings,
 
-    /// OpenAI configuration (optional)
-    pub openai: Option<OpenAISettings>,
-
-    /// Local LLM (Ollama) configuration
+    /// Local LLM (Ollama) configuration for preprocessing
     pub local: LocalLLMSettings,
 
     /// Orchestration settings
@@ -51,18 +48,135 @@ pub struct Config {
 
     /// Cache settings
     pub cache: CacheSettings,
+
+    /// Legacy Venice settings (for backward compatibility)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub venice: Option<VeniceSettings>,
+
+    /// Legacy Claude settings (for backward compatibility)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claude: Option<ClaudeSettings>,
+
+    /// Legacy OpenAI settings (for backward compatibility)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub openai: Option<OpenAISettings>,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            venice: VeniceSettings::default(),
-            claude: ClaudeSettings::default(),
-            openai: None,
+            primary: PrimaryProviderSettings::default(),
+            fallback: FallbackProviderSettings::default(),
             local: LocalLLMSettings::default(),
             orchestrator: OrchestratorSettings::default(),
             optimization: OptimizationSettings::default(),
             cache: CacheSettings::default(),
+            // Legacy fields
+            venice: None,
+            claude: None,
+            openai: None,
+        }
+    }
+}
+
+/// Primary provider settings (Venice.ai)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PrimaryProviderSettings {
+    /// Provider type (currently only "venice" supported)
+    pub provider: String,
+
+    /// API key (can also use VENICE_API_KEY env var)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+
+    /// Base URL for the API
+    pub base_url: String,
+
+    /// Model to use for code generation
+    /// Venice options: llama-3.3-70b, deepseek-coder-v2, qwen-2.5-coder-32b, etc.
+    pub model: String,
+
+    /// Minimum USD balance before triggering fallback
+    pub min_balance_usd: f64,
+
+    /// Minimum Diem balance before triggering fallback
+    pub min_balance_diem: f64,
+
+    /// Maximum tokens for responses
+    pub max_tokens: u32,
+
+    /// Temperature for generation (0.0 - 1.0)
+    pub temperature: f32,
+
+    /// Whether this provider is enabled
+    pub enabled: bool,
+}
+
+impl Default for PrimaryProviderSettings {
+    fn default() -> Self {
+        Self {
+            provider: "venice".to_string(),
+            api_key: None,
+            base_url: "https://api.venice.ai/api/v1".to_string(),
+            model: "llama-3.3-70b".to_string(),
+            min_balance_usd: 0.10,
+            min_balance_diem: 0.10,
+            max_tokens: 4096,
+            temperature: 0.7,
+            enabled: true,
+        }
+    }
+}
+
+/// Fallback provider settings
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FallbackProviderSettings {
+    /// Provider type: "claude", "openai", or "none"
+    pub provider: String,
+
+    /// API key (can also use ANTHROPIC_API_KEY or OPENAI_API_KEY env var)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+
+    /// Base URL for the API
+    pub base_url: String,
+
+    /// Model to use for code generation
+    /// Claude options: claude-sonnet-4-20250514, claude-opus-4-20250514
+    /// OpenAI options: gpt-4, gpt-4-turbo, gpt-4o
+    pub model: String,
+
+    /// Maximum tokens for responses
+    pub max_tokens: u32,
+
+    /// Temperature for generation (0.0 - 1.0)
+    pub temperature: f32,
+
+    /// Whether this provider is enabled
+    pub enabled: bool,
+
+    /// Use Claude Code CLI instead of API (Claude only)
+    pub use_cli: bool,
+
+    /// Path to Claude Code CLI (if not in PATH)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cli_path: Option<String>,
+}
+
+impl Default for FallbackProviderSettings {
+    fn default() -> Self {
+        Self {
+            provider: "claude".to_string(),
+            api_key: None,
+            base_url: "https://api.anthropic.com/v1".to_string(),
+            model: "claude-sonnet-4-20250514".to_string(),
+            max_tokens: 4096,
+            temperature: 0.7,
+            enabled: true,
+            use_cli: true,
+            cli_path: None,
         }
     }
 }
@@ -358,36 +472,34 @@ impl Config {
 
     /// Apply environment variable overrides
     pub fn with_env_overrides(mut self) -> Self {
-        // Venice
+        // Primary provider (Venice)
         if let Ok(key) = std::env::var("VENICE_API_KEY") {
-            self.venice.api_key = Some(key);
+            self.primary.api_key = Some(key);
         }
         if let Ok(url) = std::env::var("VENICE_BASE_URL") {
-            self.venice.base_url = url;
+            self.primary.base_url = url;
         }
         if let Ok(model) = std::env::var("VENICE_MODEL") {
-            self.venice.model = model;
+            self.primary.model = model;
         }
 
-        // Claude/Anthropic
+        // Fallback provider
+        // Check for Claude first, then OpenAI
         if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
-            self.claude.api_key = Some(key);
+            if self.fallback.provider == "claude" {
+                self.fallback.api_key = Some(key);
+            }
         }
-        if let Ok(url) = std::env::var("ANTHROPIC_BASE_URL") {
-            self.claude.base_url = url;
-        }
-        if let Ok(model) = std::env::var("ANTHROPIC_MODEL") {
-            self.claude.model = model;
-        }
-
-        // OpenAI
         if let Ok(key) = std::env::var("OPENAI_API_KEY") {
-            if self.openai.is_none() {
-                self.openai = Some(OpenAISettings::default());
+            if self.fallback.provider == "openai" {
+                self.fallback.api_key = Some(key);
             }
-            if let Some(ref mut openai) = self.openai {
-                openai.api_key = Some(key);
-            }
+        }
+        if let Ok(url) = std::env::var("FALLBACK_BASE_URL") {
+            self.fallback.base_url = url;
+        }
+        if let Ok(model) = std::env::var("FALLBACK_MODEL") {
+            self.fallback.model = model;
         }
 
         // Local LLM
@@ -396,6 +508,55 @@ impl Config {
         }
         if let Ok(model) = std::env::var("OLLAMA_MODEL") {
             self.local.model = model;
+        }
+
+        // Migrate legacy config sections if present
+        self = self.migrate_legacy();
+
+        self
+    }
+
+    /// Migrate legacy venice/claude sections to new primary/fallback structure
+    fn migrate_legacy(mut self) -> Self {
+        // Migrate legacy venice settings to primary
+        if let Some(venice) = self.venice.take() {
+            if venice.api_key.is_some() {
+                self.primary.api_key = venice.api_key;
+            }
+            self.primary.base_url = venice.base_url;
+            self.primary.model = venice.model;
+            self.primary.min_balance_usd = venice.min_balance_usd;
+            self.primary.min_balance_diem = venice.min_balance_diem;
+            self.primary.max_tokens = venice.max_tokens;
+            self.primary.temperature = venice.temperature;
+            self.primary.enabled = venice.enabled;
+        }
+
+        // Migrate legacy claude settings to fallback
+        if let Some(claude) = self.claude.take() {
+            if claude.api_key.is_some() {
+                self.fallback.api_key = claude.api_key;
+            }
+            self.fallback.provider = "claude".to_string();
+            self.fallback.base_url = claude.base_url;
+            self.fallback.model = claude.model;
+            self.fallback.max_tokens = claude.max_tokens;
+            self.fallback.temperature = claude.temperature;
+            self.fallback.enabled = claude.enabled;
+            self.fallback.use_cli = claude.use_cli_fallback;
+            self.fallback.cli_path = claude.cli_path;
+        }
+
+        // Migrate legacy openai settings to fallback if no claude
+        if let Some(openai) = self.openai.take() {
+            if self.fallback.api_key.is_none() && openai.api_key.is_some() {
+                self.fallback.provider = "openai".to_string();
+                self.fallback.api_key = openai.api_key;
+                self.fallback.base_url = openai.base_url;
+                self.fallback.model = openai.model;
+                self.fallback.max_tokens = openai.max_tokens;
+                self.fallback.temperature = openai.temperature;
+            }
         }
 
         self
@@ -422,38 +583,55 @@ impl Config {
     /// Validate configuration
     pub fn validate(&self) -> Result<(), ConfigError> {
         // Check if at least one provider is configured
-        let venice_configured = self.venice.enabled
-            && (self.venice.api_key.is_some()
+        let primary_configured = self.primary.enabled
+            && (self.primary.api_key.is_some()
                 || std::env::var("VENICE_API_KEY").is_ok());
 
-        let claude_configured = self.claude.enabled
-            && (self.claude.api_key.is_some()
-                || std::env::var("ANTHROPIC_API_KEY").is_ok()
-                || self.claude.use_cli_fallback);
+        let fallback_configured = self.fallback.enabled
+            && (self.fallback.api_key.is_some()
+                || self.fallback_api_key().is_some()
+                || (self.fallback.provider == "claude" && self.fallback.use_cli));
 
-        if !venice_configured && !claude_configured {
+        if !primary_configured && !fallback_configured {
             return Err(ConfigError::MissingRequired(
-                "At least one provider must be configured (VENICE_API_KEY or ANTHROPIC_API_KEY)".to_string()
+                "At least one provider must be configured (VENICE_API_KEY or ANTHROPIC_API_KEY/OPENAI_API_KEY)".to_string()
             ));
         }
 
         Ok(())
     }
 
-    /// Get Venice API key (from config or env)
-    pub fn venice_api_key(&self) -> Option<String> {
-        self.venice
+    /// Get primary provider (Venice) API key (from config or env)
+    pub fn primary_api_key(&self) -> Option<String> {
+        self.primary
             .api_key
             .clone()
             .or_else(|| std::env::var("VENICE_API_KEY").ok())
     }
 
-    /// Get Claude API key (from config or env)
+    /// Get fallback provider API key (from config or env)
+    pub fn fallback_api_key(&self) -> Option<String> {
+        self.fallback.api_key.clone().or_else(|| {
+            match self.fallback.provider.as_str() {
+                "claude" => std::env::var("ANTHROPIC_API_KEY").ok(),
+                "openai" => std::env::var("OPENAI_API_KEY").ok(),
+                _ => None,
+            }
+        })
+    }
+
+    /// Get Venice API key (legacy alias)
+    pub fn venice_api_key(&self) -> Option<String> {
+        self.primary_api_key()
+    }
+
+    /// Get Claude API key (legacy alias)
     pub fn claude_api_key(&self) -> Option<String> {
-        self.claude
-            .api_key
-            .clone()
-            .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
+        if self.fallback.provider == "claude" {
+            self.fallback_api_key()
+        } else {
+            std::env::var("ANTHROPIC_API_KEY").ok()
+        }
     }
 
     /// Generate example config content
@@ -475,26 +653,76 @@ impl ConfigBuilder {
         }
     }
 
-    pub fn venice_api_key(mut self, key: impl Into<String>) -> Self {
-        self.config.venice.api_key = Some(key.into());
+    // Primary provider (Venice) settings
+    pub fn primary_api_key(mut self, key: impl Into<String>) -> Self {
+        self.config.primary.api_key = Some(key.into());
         self
     }
 
-    pub fn venice_model(mut self, model: impl Into<String>) -> Self {
-        self.config.venice.model = model.into();
+    pub fn primary_model(mut self, model: impl Into<String>) -> Self {
+        self.config.primary.model = model.into();
         self
+    }
+
+    pub fn primary_base_url(mut self, url: impl Into<String>) -> Self {
+        self.config.primary.base_url = url.into();
+        self
+    }
+
+    pub fn primary_min_balance(mut self, usd: f64, diem: f64) -> Self {
+        self.config.primary.min_balance_usd = usd;
+        self.config.primary.min_balance_diem = diem;
+        self
+    }
+
+    // Fallback provider settings
+    pub fn fallback_provider(mut self, provider: impl Into<String>) -> Self {
+        self.config.fallback.provider = provider.into();
+        self
+    }
+
+    pub fn fallback_api_key(mut self, key: impl Into<String>) -> Self {
+        self.config.fallback.api_key = Some(key.into());
+        self
+    }
+
+    pub fn fallback_model(mut self, model: impl Into<String>) -> Self {
+        self.config.fallback.model = model.into();
+        self
+    }
+
+    pub fn fallback_base_url(mut self, url: impl Into<String>) -> Self {
+        self.config.fallback.base_url = url.into();
+        self
+    }
+
+    pub fn fallback_use_cli(mut self, use_cli: bool) -> Self {
+        self.config.fallback.use_cli = use_cli;
+        self
+    }
+
+    // Legacy aliases
+    pub fn venice_api_key(self, key: impl Into<String>) -> Self {
+        self.primary_api_key(key)
+    }
+
+    pub fn venice_model(self, model: impl Into<String>) -> Self {
+        self.primary_model(model)
     }
 
     pub fn claude_api_key(mut self, key: impl Into<String>) -> Self {
-        self.config.claude.api_key = Some(key.into());
+        self.config.fallback.provider = "claude".to_string();
+        self.config.fallback.api_key = Some(key.into());
         self
     }
 
     pub fn claude_model(mut self, model: impl Into<String>) -> Self {
-        self.config.claude.model = model.into();
+        self.config.fallback.provider = "claude".to_string();
+        self.config.fallback.model = model.into();
         self
     }
 
+    // Local LLM settings
     pub fn local_llm_url(mut self, url: impl Into<String>) -> Self {
         self.config.local.url = url.into();
         self
@@ -505,16 +733,7 @@ impl ConfigBuilder {
         self
     }
 
-    pub fn primary_provider(mut self, provider: impl Into<String>) -> Self {
-        self.config.orchestrator.primary_provider = provider.into();
-        self
-    }
-
-    pub fn fallback_provider(mut self, provider: impl Into<String>) -> Self {
-        self.config.orchestrator.fallback_provider = provider.into();
-        self
-    }
-
+    // General settings
     pub fn target_tokens(mut self, tokens: usize) -> Self {
         self.config.optimization.target_tokens = tokens;
         self
@@ -538,27 +757,31 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = Config::default();
-        assert_eq!(config.venice.model, "llama-3.3-70b");
-        assert_eq!(config.orchestrator.primary_provider, "venice");
+        assert_eq!(config.primary.model, "llama-3.3-70b");
+        assert_eq!(config.primary.provider, "venice");
+        assert_eq!(config.fallback.provider, "claude");
     }
 
     #[test]
     fn test_config_builder() {
         let config = ConfigBuilder::new()
-            .venice_api_key("test-key")
-            .venice_model("deepseek-coder-v2")
+            .primary_api_key("test-key")
+            .primary_model("deepseek-coder-v2")
+            .fallback_provider("claude")
+            .fallback_model("claude-opus-4-20250514")
             .target_tokens(8000)
             .build();
 
-        assert_eq!(config.venice.api_key, Some("test-key".to_string()));
-        assert_eq!(config.venice.model, "deepseek-coder-v2");
+        assert_eq!(config.primary.api_key, Some("test-key".to_string()));
+        assert_eq!(config.primary.model, "deepseek-coder-v2");
+        assert_eq!(config.fallback.model, "claude-opus-4-20250514");
         assert_eq!(config.optimization.target_tokens, 8000);
     }
 
     #[test]
     fn test_example_config() {
         let example = Config::example();
-        assert!(example.contains("[venice]"));
-        assert!(example.contains("[claude]"));
+        assert!(example.contains("[primary]"));
+        assert!(example.contains("[fallback]"));
     }
 }
