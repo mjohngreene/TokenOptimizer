@@ -30,6 +30,18 @@ impl TerminalRenderer {
 
     /// Render the welcome banner
     pub fn render_banner(&self, version: &str, provider: &str, model: &str) {
+        self.render_banner_pipeline(version, provider, model, None, None);
+    }
+
+    /// Render the welcome banner with full pipeline info
+    pub fn render_banner_pipeline(
+        &self,
+        version: &str,
+        provider: &str,
+        model: &str,
+        local_info: Option<&str>,
+        fallback_info: Option<&str>,
+    ) {
         println!();
         println!(
             "{}",
@@ -41,12 +53,33 @@ impl TerminalRenderer {
             "v".with(self.theme.dim),
             version.with(self.theme.dim)
         );
+
+        // Build pipeline display
+        let mut pipeline_parts = Vec::new();
+        if let Some(local) = local_info {
+            pipeline_parts.push(format!("Local ({})", local));
+        }
+        pipeline_parts.push(format!("{} ({})", provider, model));
+        if let Some(fb) = fallback_info {
+            pipeline_parts.push(format!("{} (fallback)", fb));
+        }
+        let pipeline = pipeline_parts.join(" -> ");
+
         println!(
-            "  {} {} {}",
-            "Provider:".with(self.theme.dim),
-            provider.with(self.theme.stats),
-            format!("({})", model).with(self.theme.dim)
+            "  {} {}",
+            "Pipeline:".with(self.theme.dim),
+            pipeline.with(self.theme.stats),
         );
+
+        if local_info.is_none() && fallback_info.is_none() {
+            // Simple mode, no pipeline extras
+        } else if local_info.is_none() {
+            println!(
+                "  {}",
+                "Local preprocessing: unavailable".with(self.theme.dim)
+            );
+        }
+
         println!(
             "  {}",
             "Type /help for commands, /quit to exit"

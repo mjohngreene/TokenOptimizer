@@ -9,6 +9,7 @@ pub mod renderer;
 pub mod spinner;
 pub mod theme;
 
+use crate::agents::{LocalAgent, LocalAgentConfig, PreprocessingAgent};
 use crate::api::{
     ApiConfig, ApiAgent, ApiProvider, ApiRequest, ContextItem, ContextType, Message,
     ProviderType, Role, StreamChunk, StreamingProvider, TokenUsage,
@@ -51,6 +52,10 @@ pub struct InteractiveShell {
     config: Config,
     provider: ActiveProvider,
     model: String,
+    /// Local LLM agent for preprocessing (Ollama), if available
+    local_agent: Option<LocalAgent>,
+    /// Fallback provider for when primary fails/exhausted
+    fallback: Option<ActiveProvider>,
     renderer: TerminalRenderer,
     prompt_handler: PromptHandler,
     /// Conversation history (user + assistant messages)
@@ -66,14 +71,35 @@ pub struct InteractiveShell {
 }
 
 impl InteractiveShell {
-    /// Create a new interactive shell, selecting the best available provider
+    /// Create a new interactive shell with Local→Primary→Fallback pipeline
     pub async fn new(config: Config) -> Result<Self> {
-        let (provider, model) = Self::select_provider(&config)?;
+        let (provider, model, fallback) = Self::build_providers(&config)?;
+
+        // Build local agent for preprocessing if configured
+        let local_agent = if config.local.enabled {
+            let agent_config = LocalAgentConfig {
+                ollama_url: config.local.url.clone(),
+                model: config.local.model.clone(),
+                max_compressed_tokens: config.local.max_compressed_tokens,
+                relevance_threshold: config.local.relevance_threshold,
+                aggressive_compression: config.local.aggressive_compression,
+            };
+            let agent = LocalAgent::new(agent_config);
+            if agent.is_available().await {
+                Some(agent)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         Ok(Self {
             config,
             provider,
             model,
+            local_agent,
+            fallback,
             renderer: TerminalRenderer::new(),
             prompt_handler: PromptHandler::new(),
             conversation: Vec::new(),
@@ -84,9 +110,12 @@ impl InteractiveShell {
         })
     }
 
-    /// Select the best available provider based on config
-    fn select_provider(config: &Config) -> Result<(ActiveProvider, String)> {
-        // Try primary (Venice) first
+    /// Build primary and optional fallback providers based on config
+    fn build_providers(config: &Config) -> Result<(ActiveProvider, String, Option<ActiveProvider>)> {
+        let mut primary: Option<(ActiveProvider, String)> = None;
+        let mut fallback: Option<ActiveProvider> = None;
+
+        // Try Venice as primary
         if config.primary.enabled {
             if let Some(api_key) = config.primary_api_key() {
                 let venice_config = VeniceConfig {
@@ -99,14 +128,14 @@ impl InteractiveShell {
                     temperature: Some(config.primary.temperature),
                 };
                 let model = venice_config.model.clone();
-                return Ok((
+                primary = Some((
                     ActiveProvider::Venice(Arc::new(VeniceProvider::new(venice_config))),
                     model,
                 ));
             }
         }
 
-        // Try fallback
+        // Build fallback from fallback config (Claude/OpenAI)
         if config.fallback.enabled {
             if let Some(api_key) = config.fallback_api_key() {
                 let provider_type = match config.fallback.provider.as_str() {
@@ -128,16 +157,23 @@ impl InteractiveShell {
                     max_tokens: Some(config.fallback.max_tokens),
                     temperature: Some(config.fallback.temperature),
                 };
-                let model = api_config.model.clone();
-                return Ok((
-                    ActiveProvider::Api(Arc::new(ApiAgent::new(api_config))),
-                    model,
-                ));
+
+                if primary.is_some() {
+                    // We have a primary, so this becomes the fallback
+                    fallback = Some(ActiveProvider::Api(Arc::new(ApiAgent::new(api_config))));
+                } else {
+                    // No primary available, promote fallback to primary
+                    let model = api_config.model.clone();
+                    primary = Some((
+                        ActiveProvider::Api(Arc::new(ApiAgent::new(api_config))),
+                        model,
+                    ));
+                }
             }
         }
 
-        // Try local Ollama
-        if config.local.enabled {
+        // If still no primary, try local Ollama as direct provider
+        if primary.is_none() && config.local.enabled {
             let api_config = ApiConfig {
                 provider: ProviderType::Ollama,
                 api_key: String::new(),
@@ -147,24 +183,34 @@ impl InteractiveShell {
                 temperature: Some(0.7),
             };
             let model = api_config.model.clone();
-            return Ok((
+            primary = Some((
                 ActiveProvider::Api(Arc::new(ApiAgent::new(api_config))),
                 model,
             ));
         }
 
-        anyhow::bail!(
-            "No provider available. Set VENICE_API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY, \
-             or ensure Ollama is running locally."
-        );
+        match primary {
+            Some((provider, model)) => Ok((provider, model, fallback)),
+            None => anyhow::bail!(
+                "No provider available. Set VENICE_API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY, \
+                 or ensure Ollama is running locally."
+            ),
+        }
     }
 
     /// Run the interactive shell main loop
     pub async fn run(&mut self) -> Result<()> {
-        self.renderer.render_banner(
+        let local_info = self
+            .local_agent
+            .as_ref()
+            .map(|_| self.config.local.model.as_str());
+        let fallback_info = self.fallback.as_ref().map(|f| f.name());
+        self.renderer.render_banner_pipeline(
             env!("CARGO_PKG_VERSION"),
             self.provider.name(),
             &self.model,
+            local_info,
+            fallback_info,
         );
 
         loop {
@@ -270,7 +316,7 @@ impl InteractiveShell {
         CommandResult::Continue
     }
 
-    /// Process a user message: build request, stream response, update history
+    /// Process a user message through the Local→Primary→Fallback pipeline
     async fn process_message(&mut self, input: &str) {
         // Build the API request
         let mut request = ApiRequest::new(input.to_string());
@@ -283,26 +329,72 @@ impl InteractiveShell {
         // Add conversation history
         request.messages = self.conversation.clone();
 
-        // Start spinner
+        // Step 1: Preprocess with local agent if available
+        if let Some(ref agent) = self.local_agent {
+            let mut spinner = ThinkingSpinner::new();
+            spinner.start("Preprocessing...");
+            match agent.optimize_request(request.clone()).await {
+                Ok(optimized) => {
+                    spinner.stop();
+                    request = optimized;
+                }
+                Err(e) => {
+                    spinner.stop();
+                    self.renderer
+                        .render_info(&format!("Local preprocessing skipped: {}", e));
+                }
+            }
+        }
+
+        // Step 2: Start thinking spinner and try primary provider
         let mut spinner = ThinkingSpinner::new();
         spinner.start("Thinking...");
 
-        // Send streaming request
         let stream_result = match &self.provider {
-            ActiveProvider::Venice(provider) => provider.send_streaming(request).await,
-            ActiveProvider::Api(agent) => agent.send_streaming(request).await,
+            ActiveProvider::Venice(provider) => provider.send_streaming(request.clone()).await,
+            ActiveProvider::Api(agent) => agent.send_streaming(request.clone()).await,
         };
 
+        // Step 3: If primary fails and fallback exists, try fallback
         let mut rx = match stream_result {
             Ok(rx) => rx,
             Err(e) => {
                 spinner.stop();
-                self.renderer.render_error(&format!("Request failed: {}", e));
-                return;
+                if self.fallback.is_some() && Self::is_fallback_worthy(&e) {
+                    self.renderer.render_system(&format!(
+                        "Primary ({}) failed: {}. Switching to fallback...",
+                        self.provider.name(),
+                        e
+                    ));
+                    let mut spinner = ThinkingSpinner::new();
+                    spinner.start("Trying fallback...");
+                    let fallback_result = match self.fallback.as_ref().unwrap() {
+                        ActiveProvider::Venice(provider) => {
+                            provider.send_streaming(request).await
+                        }
+                        ActiveProvider::Api(agent) => agent.send_streaming(request).await,
+                    };
+                    match fallback_result {
+                        Ok(rx) => {
+                            spinner.stop();
+                            rx
+                        }
+                        Err(e2) => {
+                            spinner.stop();
+                            self.renderer
+                                .render_error(&format!("Fallback also failed: {}", e2));
+                            return;
+                        }
+                    }
+                } else {
+                    self.renderer
+                        .render_error(&format!("Request failed: {}", e));
+                    return;
+                }
             }
         };
 
-        // Receive and display streaming chunks
+        // Step 4: Stream the response
         let mut full_response = String::new();
         let mut final_usage = TokenUsage::default();
         let mut first_token = true;
@@ -328,7 +420,8 @@ impl InteractiveShell {
                     if !full_response.is_empty() {
                         println!();
                     }
-                    self.renderer.render_error(&format!("Stream error: {}", msg));
+                    self.renderer
+                        .render_error(&format!("Stream error: {}", msg));
                     break;
                 }
             }
@@ -374,6 +467,17 @@ impl InteractiveShell {
             0,
             final_usage.estimated_cost_usd,
         );
+    }
+
+    /// Check if an error warrants falling back to the secondary provider
+    fn is_fallback_worthy(error: &crate::api::ApiError) -> bool {
+        let msg = error.to_string().to_lowercase();
+        matches!(error, crate::api::ApiError::RateLimited { .. })
+            || msg.contains("insufficient")
+            || msg.contains("quota")
+            || msg.contains("balance")
+            || msg.contains("credits")
+            || msg.contains("429")
     }
 
     /// Handle context management actions
@@ -641,6 +745,37 @@ impl InteractiveShell {
             "Model:".with(self.renderer.dim_color()),
             self.model.clone().with(self.renderer.stats_color()),
         );
+
+        // Show local agent status
+        if let Some(_agent) = &self.local_agent {
+            println!(
+                "  {} {} {}",
+                "Local agent:".with(self.renderer.dim_color()),
+                "available".with(self.renderer.stats_color()),
+                format!("({})", self.config.local.model).with(self.renderer.dim_color()),
+            );
+        } else {
+            println!(
+                "  {} {}",
+                "Local agent:".with(self.renderer.dim_color()),
+                "unavailable".with(self.renderer.dim_color()),
+            );
+        }
+
+        // Show fallback provider
+        if let Some(fb) = &self.fallback {
+            println!(
+                "  {} {}",
+                "Fallback:".with(self.renderer.dim_color()),
+                fb.name().with(self.renderer.stats_color()),
+            );
+        } else {
+            println!(
+                "  {} {}",
+                "Fallback:".with(self.renderer.dim_color()),
+                "none".with(self.renderer.dim_color()),
+            );
+        }
 
         // Show Venice balance if applicable
         if let ActiveProvider::Venice(venice) = &self.provider {
