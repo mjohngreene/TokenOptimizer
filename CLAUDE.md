@@ -57,11 +57,11 @@ src/
 - Cache breakpoints mark reusable boundaries
 - Cached tokens are ~90% cheaper on subsequent requests
 
-### Agent Orchestration (Venice → Claude Code)
+### Agent Orchestration (Primary → Fallback)
 The orchestrator manages a workflow where:
 1. **Local LLM** (Ollama) preprocesses and optimizes prompts
-2. **Venice.ai** receives optimized prompts as primary provider
-3. **Claude Code** is fallback when Venice credits exhausted
+2. **Primary provider** (default: Venice.ai) receives optimized prompts
+3. **Fallback provider** (default: Claude via CLI) is used when primary credits are exhausted
 
 Fallback triggers:
 - 429 error with "insufficient" / "quota" / "balance" message
@@ -69,6 +69,22 @@ Fallback triggers:
 - Manual force via `orchestrator.force_fallback()`
 
 Session handoff preserves conversation context for continuity.
+
+### Configuration Structure
+The config uses a generic **primary/fallback** provider model:
+
+- **`[primary]`** — Primary API provider (default: Venice.ai)
+  - `provider`, `api_key`, `base_url`, `model`, `min_balance_usd`, `min_balance_diem`, `max_tokens`, `temperature`, `enabled`
+  - Env vars: `VENICE_API_KEY`, `VENICE_BASE_URL`, `VENICE_MODEL`
+- **`[fallback]`** — Fallback provider (default: Claude via CLI; also supports OpenAI)
+  - `provider` ("claude", "openai", or "none"), `api_key`, `base_url`, `model`, `max_tokens`, `temperature`, `enabled`, `use_cli`, `cli_path`
+  - Env vars: `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`, `FALLBACK_BASE_URL`, `FALLBACK_MODEL`
+- **`[local]`** — Local LLM (Ollama) for preprocessing
+- **`[orchestrator]`** — Orchestration settings (retries, context preservation)
+- **`[optimization]`** — Prompt optimization settings
+- **`[cache]`** — Cache prompting settings
+
+Legacy config sections (`[venice]`, `[claude]`, `[openai]`) are still accepted and automatically migrated to the new structure via `Config::migrate_legacy()`.
 
 ## Development Commands
 
@@ -90,6 +106,14 @@ cargo run -- optimize --input "Fix the bug" --context src/main.rs
 
 # Example: analyze cache potential
 cargo run -- cache-optimize --task "Add feature" --context types.rs --static-indices "0"
+
+# Example: show config for a section
+cargo run -- config show primary
+cargo run -- config show fallback
+
+# Example: set a config value
+cargo run -- config set primary.model deepseek-coder-v2
+cargo run -- config set fallback.provider openai
 ```
 
 ## Dependencies
@@ -105,7 +129,8 @@ cargo run -- cache-optimize --task "Add feature" --context types.rs --static-ind
 
 ## API Provider Notes
 
-### Venice.ai (Primary Provider)
+### Venice.ai (Default Primary Provider)
+- Config section: `[primary]` with `provider = "venice"`
 - Base URL: `https://api.venice.ai/api/v1`
 - Uses `Authorization: Bearer` header
 - OpenAI-compatible chat completions format
@@ -116,18 +141,22 @@ cargo run -- cache-optimize --task "Add feature" --context types.rs --static-ind
 - Balance endpoint: `/api_keys/rate_limits` (beta)
 - Recommended models for code: `llama-3.3-70b`, `deepseek-coder-v2`, `qwen-2.5-coder-32b`
 
-### Anthropic Claude (Fallback Provider)
+### Anthropic Claude (Default Fallback Provider)
+- Config section: `[fallback]` with `provider = "claude"`
 - Uses `x-api-key` header
 - Supports `cache_control` blocks in system and messages
 - Returns `cache_creation_input_tokens` and `cache_read_input_tokens`
 - API version: `2023-06-01`
+- Can use Claude Code CLI instead of API (`use_cli = true`)
 
-### OpenAI
+### OpenAI (Alternative Fallback Provider)
+- Config section: `[fallback]` with `provider = "openai"`
 - Uses `Authorization: Bearer` header
 - No cache prompting support
 - Standard chat completions format
 
 ### Ollama (Local Preprocessing)
+- Config section: `[local]`
 - Local server at `http://localhost:11434`
 - OpenAI-compatible format
 - Used for preprocessing (relevance scoring, compression)
