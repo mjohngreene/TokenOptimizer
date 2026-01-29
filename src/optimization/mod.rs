@@ -17,6 +17,13 @@ pub struct OptimizationConfig {
     pub use_local_llm: bool,
     /// Preserve code blocks exactly
     pub preserve_code_blocks: bool,
+    /// Weight for keyword scoring in hybrid relevance (0.0–1.0, default 0.4)
+    #[serde(default = "default_keyword_weight")]
+    pub keyword_weight: f32,
+}
+
+fn default_keyword_weight() -> f32 {
+    0.4
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +58,7 @@ impl Default for OptimizationConfig {
             ],
             use_local_llm: true,
             preserve_code_blocks: true,
+            keyword_weight: default_keyword_weight(),
         }
     }
 }

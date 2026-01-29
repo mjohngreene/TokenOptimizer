@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-TokenOptimizer is a Rust library and CLI tool for coordinating code agents with minimal token consumption. The primary goal is to reduce API costs when working with LLM-based coding assistants.
+TokenOptimizer is a Rust library and CLI tool for coordinating code agents with minimal token consumption. The primary goal is to reduce API costs when working with LLM-based coding assistants. See `SKILL.md` for an agent-discoverable capability manifest.
 
 ## Architecture
 
@@ -53,12 +53,12 @@ src/
 ### Optimization Strategies
 1. `StripWhitespace` - Remove unnecessary whitespace
 2. `RemoveComments` - Strip code comments
-3. `TruncateContext` - Smart truncation at logical boundaries
+3. `TruncateContext` - Boundary-aware truncation using `tiktoken-rs` token counts and priority-based boundary detection (code structure > paragraph > sentence > line > word). Validates truncation against token budget and retries with tighter limits if >10% over.
 4. `Abbreviate` - Common word abbreviations
 5. `LlmCompress` - Use local LLM for compression
-6. `RelevanceFilter` - Filter by relevance score
+6. `RelevanceFilter` - Hybrid keyword + LLM relevance scoring. Works without a local LLM via keyword-only mode (term frequency with log-TF, blending coverage and density). When a local agent is available, uses position-aware blending controlled by `keyword_weight` config (default `0.4`).
 7. `ExtractSignatures` - Keep only function/class signatures
-8. `Deduplicate` - Remove duplicate content
+8. `Deduplicate` - 3-stage deduplication pipeline: exact hash, whitespace-normalized hash, and line-set Jaccard similarity (threshold 0.8) with length-ratio pre-filter
 
 ### Cache Prompting
 - Anthropic requires ~1024 tokens minimum for caching
@@ -105,7 +105,7 @@ The config uses a generic **primary/fallback** provider model:
   - Env vars: `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`, `FALLBACK_BASE_URL`, `FALLBACK_MODEL`
 - **`[local]`** — Local LLM (Ollama) for preprocessing
 - **`[orchestrator]`** — Orchestration settings (retries, context preservation)
-- **`[optimization]`** — Prompt optimization settings
+- **`[optimization]`** — Prompt optimization settings (`keyword_weight`: 0.0–1.0, default 0.4, controls keyword vs LLM blending in hybrid relevance)
 - **`[cache]`** — Cache prompting settings
 
 Legacy config sections (`[venice]`, `[claude]`, `[openai]`) are still accepted and automatically migrated to the new structure via `Config::migrate_legacy()`.

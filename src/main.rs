@@ -278,6 +278,7 @@ async fn run_optimize(
         ],
         use_local_llm: local_agent.is_some(),
         preserve_code_blocks: true,
+        keyword_weight: 0.4,
     };
 
     let optimizer = PromptOptimizer::new(config, local_agent);
@@ -444,6 +445,7 @@ async fn run_benchmark(input: PathBuf, context_files: Vec<PathBuf>) -> Result<()
             strategies,
             use_local_llm: false,
             preserve_code_blocks: true,
+            keyword_weight: 0.4,
         };
 
         let optimizer = PromptOptimizer::new(config, None);
