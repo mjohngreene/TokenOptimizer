@@ -18,6 +18,8 @@ src/
 │   ├── client.rs       # Multi-provider client (Claude, OpenAI, Ollama)
 │   ├── request.rs      # ApiRequest, ContextItem structures
 │   ├── response.rs     # ApiResponse, TokenUsage with cache support
+│   ├── sse.rs          # SSE parser (OpenAI, Anthropic, Ollama formats)
+│   ├── streaming.rs    # StreamChunk, StreamingProvider trait
 │   └── venice.rs       # Venice.ai provider with credit tracking
 ├── cache/              # Cache prompting optimization
 │   ├── mod.rs          # CacheConfig, CacheControl types
@@ -28,9 +30,16 @@ src/
 ├── optimization/       # Prompt optimization
 │   ├── mod.rs          # OptimizationConfig, StrategyType enum
 │   └── strategies.rs   # PromptOptimizer, strategy implementations
-└── orchestrator/       # Agent coordination with fallback
-    ├── mod.rs          # Orchestrator, FallbackProvider trait
-    └── session.rs      # Session management for handoffs
+├── orchestrator/       # Agent coordination with fallback
+│   ├── mod.rs          # Orchestrator, FallbackProvider trait
+│   └── session.rs      # Session management for handoffs
+└── tui/                # Interactive terminal UI
+    ├── mod.rs          # InteractiveShell main loop and provider selection
+    ├── theme.rs        # Color constants (prompt, assistant, error, etc.)
+    ├── spinner.rs      # ThinkingSpinner with braille animation
+    ├── renderer.rs     # TerminalRenderer with termimad markdown support
+    ├── prompt.rs       # PromptHandler with input history
+    └── commands.rs     # Slash command parser and help renderer
 ```
 
 ## Key Concepts
@@ -69,6 +78,21 @@ Fallback triggers:
 - Manual force via `orchestrator.force_fallback()`
 
 Session handoff preserves conversation context for continuity.
+
+### Interactive Mode (TUI)
+The `interactive` subcommand launches a Claude Code-style shell with:
+- **Streaming responses** via SSE parsing (`StreamingProvider` trait, `StreamChunk` enum)
+- **Multi-turn conversation** history passed to providers in request messages
+- **Markdown rendering** using `termimad` (re-renders after streaming completes if content has markdown elements)
+- **Thinking spinner** shown until the first token arrives
+- **Slash commands**: `/help`, `/quit`, `/clear`, `/model [name]`, `/provider [name]`, `/stats`, `/status`, `/compact`, `/context add|remove|list|clear`
+- **Provider auto-selection**: tries primary (Venice) -> fallback (Claude/OpenAI) -> local (Ollama)
+- **Live provider/model switching** via `/provider` and `/model` commands
+
+SSE formats supported (`src/api/sse.rs`):
+- **OpenAI/Venice**: `data: {"choices":[{"delta":{"content":"..."}}]}`
+- **Anthropic**: `event: content_block_delta` / `data: {"delta":{"text":"..."}}`
+- **Ollama**: line-delimited JSON `{"message":{"content":"..."}}`
 
 ### Configuration Structure
 The config uses a generic **primary/fallback** provider model:
@@ -114,6 +138,9 @@ cargo run -- config show fallback
 # Example: set a config value
 cargo run -- config set primary.model deepseek-coder-v2
 cargo run -- config set fallback.provider openai
+
+# Example: launch interactive mode
+cargo run -- interactive
 ```
 
 ## Dependencies
@@ -126,6 +153,10 @@ cargo run -- config set fallback.provider openai
 - `async-trait` - Async trait support
 - `anyhow` / `thiserror` - Error handling
 - `tracing` - Logging
+- `crossterm` - Terminal colors, cursor, styled output
+- `termimad` - Markdown rendering in terminal
+- `indicatif` - Spinner/progress indicators
+- `tokio-stream` / `futures-util` - Streaming SSE support
 
 ## API Provider Notes
 
