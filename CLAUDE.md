@@ -28,13 +28,13 @@ src/
 ├── metrics/            # Token tracking
 │   └── mod.rs          # TokenMetrics, MetricsTracker
 ├── optimization/       # Prompt optimization
-│   ├── mod.rs          # OptimizationConfig, StrategyType enum
-│   └── strategies.rs   # PromptOptimizer, strategy implementations
+│   ├── mod.rs          # OptimizationConfig, StrategyType, from_settings(); re-exports count_tokens/smart_truncate
+│   └── strategies.rs   # PromptOptimizer, strategy implementations, count_tokens, smart_truncate
 ├── orchestrator/       # Agent coordination with fallback
-│   ├── mod.rs          # Orchestrator, FallbackProvider trait
+│   ├── mod.rs          # Orchestrator, FallbackProvider trait, optimized fallback handoff
 │   └── session.rs      # Session management for handoffs
 └── tui/                # Interactive terminal UI
-    ├── mod.rs          # InteractiveShell main loop and provider selection
+    ├── mod.rs          # InteractiveShell main loop, optimizer integration, token-aware history
     ├── theme.rs        # Color constants (prompt, assistant, error, etc.)
     ├── spinner.rs      # ThinkingSpinner with braille animation
     ├── renderer.rs     # TerminalRenderer with termimad markdown support
@@ -77,17 +77,26 @@ Fallback triggers:
 - Balance headers below threshold (`x-venice-balance-usd`, `x-venice-balance-diem`)
 - Manual force via `orchestrator.force_fallback()`
 
-Session handoff preserves conversation context for continuity.
+Session handoff preserves conversation context for continuity. On handoff, session history is compressed via `smart_truncate()` (~2000 chars) and the request is optimized with `StripWhitespace` + `RemoveComments` + `TruncateContext` + `Deduplicate` before dispatch to fallback.
 
 ### Interactive Mode (TUI)
 The `interactive` subcommand launches a Claude Code-style shell with:
 - **Streaming responses** via SSE parsing (`StreamingProvider` trait, `StreamChunk` enum)
 - **Multi-turn conversation** history passed to providers in request messages
+- **Prompt optimization** via `PromptOptimizer` runs after local preprocessing and before provider send; displays token savings. On fallback, re-optimizes with tighter strategies (`StripWhitespace`, `RemoveComments`, `TruncateContext`, `Deduplicate`).
+- **Token-aware history compaction** with 8000-token budget (`max_history_tokens`). Auto-compacts before each request when over budget. Strategy: keep first exchange, middle user-only messages, last 2 full exchanges. Manual compaction via `/compact`.
 - **Markdown rendering** using `termimad` (re-renders after streaming completes if content has markdown elements)
 - **Thinking spinner** shown until the first token arrives
 - **Slash commands**: `/help`, `/quit`, `/clear`, `/model [name]`, `/provider [name]`, `/stats`, `/status`, `/compact`, `/context add|remove|list|clear`
 - **Provider auto-selection**: tries primary (Venice) -> fallback (Claude/OpenAI) -> local (Ollama)
 - **Live provider/model switching** via `/provider` and `/model` commands
+
+The TUI `process_message()` pipeline:
+1. Build request with context files and conversation history (auto-compacted)
+2. Preprocess with local agent (Ollama) if available
+3. Run `PromptOptimizer` with configured strategies
+4. Send to primary provider (streaming)
+5. On primary failure: re-optimize with tighter budget, send to fallback
 
 SSE formats supported (`src/api/sse.rs`):
 - **OpenAI/Venice**: `data: {"choices":[{"delta":{"content":"..."}}]}`
@@ -105,7 +114,7 @@ The config uses a generic **primary/fallback** provider model:
   - Env vars: `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`, `FALLBACK_BASE_URL`, `FALLBACK_MODEL`
 - **`[local]`** — Local LLM (Ollama) for preprocessing
 - **`[orchestrator]`** — Orchestration settings (retries, context preservation)
-- **`[optimization]`** — Prompt optimization settings (`keyword_weight`: 0.0–1.0, default 0.4, controls keyword vs LLM blending in hybrid relevance)
+- **`[optimization]`** — Prompt optimization settings (`keyword_weight`: 0.0–1.0, default 0.4, controls keyword vs LLM blending in hybrid relevance). String strategy names in config are converted to `StrategyType` enums via `OptimizationConfig::from_settings()`.
 - **`[cache]`** — Cache prompting settings
 
 Legacy config sections (`[venice]`, `[claude]`, `[openai]`) are still accepted and automatically migrated to the new structure via `Config::migrate_legacy()`.
